@@ -239,6 +239,9 @@ def run_research_node():
                         by_id = {c.id: c for c in claims}
                         claims = [*(by_id[cid] for cid in questions), *(c for c in claims if c.id not in questions)]
                     for claim in claims:
+                        if any(v.target_id == claim.id and v.target_version == claim.version and
+                               "本次语义核查未完成" not in v.unchecked for v in card.verifications):
+                            continue
                         core_question = questions.get(claim.id)
                         for previous in list(card.claims):
                             merged = merge_duplicate(previous, claim, scope)
@@ -333,7 +336,8 @@ def run_research_node():
                         if s['paper_id'] == card.paper_id and s['claim']['id'] in current_ids]
                     if previous_plan:
                         argument_plan = dict(previous_plan)
-                    elif early_arguments and {a['claim_id'] for a in early_arguments} == current_ids:
+                    elif early_arguments and ({a['claim_id'] for a in early_arguments} == current_ids
+                                              or tasks.calls + 3 > options.max_calls):
                         argument_plan = {'paper_id': card.paper_id, 'status': 'planned',
                                          'arguments': early_arguments, 'warnings': []}
                     else:
@@ -434,10 +438,8 @@ def run_research_node():
                 paper_questions = [q for q in questions if q['paper_id'] == card.paper_id]
                 linked = set()
                 for q in paper_questions:
-                    q['candidate_ids'] = sorted({str(i['paper'].get('paperId') or i['paper'].get('id'))
-                        for i in items if i.get('source_role') == 'external_candidate'
-                        and q['local_review']['decision'] == 'external_needed'
-                        and q['gap_id'] in i.get('acquisition_gap_ids', [])})
+                    matches = external_search.get('candidates_by_gap', {}).get(q['gap_id'], [])
+                    q['candidate_ids'] = sorted(external_ids.intersection(matches)) if q['local_review']['decision'] == 'external_needed' else []
                     linked.update(q['candidate_ids'])
                     q['acquisition_status'] = external_search['status'] if q['local_review']['decision'] == 'external_needed' else 'not_requested'
                 argument_plan['evidence_questions'] = paper_questions

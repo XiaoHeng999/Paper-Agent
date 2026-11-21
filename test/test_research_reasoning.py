@@ -144,8 +144,17 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                     support = data['external_support'][0]
                     support['relation'] = relation
                     insight = data['insights'][0]
+                    if relation == 'rejected':
+                        support['relation'] = 'supports'
+                        insight['epistemic_status'] = 'supported_inference'
                     insight['gap_ids'] = [support['gap_id']]
                     insight['evidence_ids'].extend(support['evidence_ids'])
+                    response.content = json.dumps(data)
+                if p['role'] == 'reasoning_verifier' and relation == 'rejected':
+                    data = json.loads(response.content)
+                    for check in data['checks']:
+                        if check['target_type'] == 'external_support':
+                            check['verdict'] = 'unsupported'
                     response.content = json.dumps(data)
                 return response
         def fulltext(item):
@@ -153,7 +162,8 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
             return [EvidenceSpan(id=pid+'_span', paper_id=pid, version='v1', text='Matched ablation',
                                  source_level='full_text')]
         for relation, update in [('supports','增强判断'), ('challenges','削弱判断'),
-                                 ('different_conditions','条件不同，保留判断')]:
+                                 ('different_conditions','条件不同，保留判断'),
+                                 ('rejected','佐证尚未充分通过核查，保留判断')]:
             with self.subTest(relation=relation):
                 task = self.task(LinkedInsight(), allow_external_search=True)
                 task['research_search_service'] = SimpleNamespace(async_search=AsyncMock(return_value=SimpleNamespace(
@@ -166,7 +176,44 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['insights'][0]['gap_ids'], [gid])
                 self.assertIn('ext_span', result['insights'][0]['evidence_ids'])
                 self.assertEqual(result['external_support'][0]['gap_id'], gid)
+                if relation == 'rejected':
+                    self.assertEqual(result['insights'][0]['epistemic_status'], 'hypothesis')
+                    self.assertEqual(next(c['verdict'] for c in result['checks'] if c['target_type'] == 'insight'), 'qualified')
                 self.assertIn('对判断的影响：'+update, output['research_markdown'])
+
+    async def test_shared_query_and_transient_failure_preserve_candidates_on_resume(self):
+        gaps = [{'claim_id': 'claim', 'gap_id': gid, 'paper_id': 'p1', 'search_query': query}
+                for gid, query in [('g1','query one'), ('g2','query  one'), ('g3','query two')]]
+        task = self.task(ReasoningModel(), allow_external_search=True)
+        task['research_challenges'] = gaps
+        paper = PaperDocument(id='ext', title='First match')
+        match = SimpleNamespace(papers=[paper], errors={})
+        empty = SimpleNamespace(papers=[], errors={})
+        search = AsyncMock(side_effect=[match, TimeoutError(), empty])
+        task['research_search_service'] = SimpleNamespace(async_search=search)
+        tasks = ModelTasks(ReasoningModel(), ResearchOptions(allow_external_search=True))
+        download = AsyncMock(return_value=SimpleNamespace(file_path=None))
+        with patch('src.research.supplement.async_download_paper_fulltext', download):
+            items, audit = await supplement_sources(task, [item()], tasks)
+            self.assertEqual(audit['status'], 'partial')
+            self.assertEqual(audit['queries'], ['query one','query two'])
+            self.assertEqual(items[-1]['acquisition_gap_ids'], ['g1','g2'])
+            task['read_resume_checkpoint'] = {'external_search': audit}
+            items, audit = await supplement_sources(task, items, tasks)
+            self.assertEqual(audit['status'], 'completed')
+            self.assertEqual(audit['added_paper_ids'], ['ext'])
+            task['read_resume_checkpoint'] = {'external_search': audit}
+            await supplement_sources(task, items, tasks)
+        self.assertEqual(search.await_count, 3)
+        self.assertEqual(search.await_args.kwargs['query'], 'query two')
+        self.assertEqual(audit['candidates_by_gap'], {'g1':['ext'], 'g2':['ext']})
+        download.assert_awaited_once()
+        # A new search policy may exclude an old candidate even with unchanged gap IDs.
+        task['request'].constraints['year_from'] = 2025
+        search.side_effect = [empty, empty]
+        _, filtered = await supplement_sources(task, items, tasks)
+        self.assertEqual(filtered['candidates_by_gap'], {})
+        self.assertEqual(filtered['added_paper_ids'], [])
 
     async def test_two_gaps_cannot_exchange_candidates_even_within_one_argument(self):
         class Swapped(ReasoningModel):
@@ -198,6 +245,22 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'unavailable')
         self.assertFalse(result['external_support'])
         self.assertIn('不匹配', result['warnings'][-1])
+
+    async def test_repeated_claim_does_not_spend_last_synthesis_calls(self):
+        class DuplicateReader(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                p = json.loads(messages[-1]['content'])
+                response = await super(DuplicateReader, model).chat(messages, **kwargs)
+                if p['role'] == 'paper_reader':
+                    data = json.loads(response.content)
+                    data['claims'] *= 2
+                    response.content = json.dumps(data)
+                return response
+        model = DuplicateReader(gap=False)
+        report = (await run_research_node()(self.task(model, research_max_calls=6)))['research_report']
+        self.assertEqual(len(report['cards'][0]['claims']), 1)
+        self.assertEqual(sum(r['role'] == 'evidence_verifier' for r in model.requests), 1)
+        self.assertEqual(report['reasoning'][0]['status'], 'reviewed')
 
     async def test_core_question_is_reviewed_and_saved_before_secondary_verification(self):
         class RankedReader(ReasoningModel):
@@ -248,7 +311,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
     async def test_citable_paraphrase_requires_scoped_review_and_a_matching_passage(self):
         # Controlled figure-7 fixture: the first latency is the system baseline;
         # the second already includes fusion and caching.
-        excerpt = "HunyuanVideo on B200: baseline 866.9 s, fused and cached 328.4 s, full system 170.6 s."
+        excerpt = "Experiment E1, HunyuanVideo on B200: baseline 866.9 s, fused and cached 328.4 s, full system 170.6 s."
         sentence = "作者报告，在 B200 的 HunyuanVideo 实验中，完整系统相对初始基线的端到端加速为 5.08 倍。"
         span = EvidenceSpan(id='p1:figure7', paper_id='p1', version='v1', source_level='full_text',
                             section='System integration', page_start=8, text=excerpt)

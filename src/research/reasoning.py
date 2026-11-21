@@ -1,4 +1,5 @@
 """Versioned argument construction and independently reviewed insights, not agent chat handoffs."""
+import json
 import re
 from typing import Literal
 
@@ -103,22 +104,33 @@ class ReasoningReview(Record):
 
 async def ask_scoped(tasks, role, instruction, payload, schema, claims, evidence):
     # Short, reversible handles reduce copying errors; raw text and source versions are unchanged.
-    aliases = {cid: f'C{i+1}' for i, cid in enumerate(claims)}
-    aliases.update({eid: f'E{i+1}' for i, eid in enumerate(evidence)})
     questions = payload.get('evidence_questions', []) or ([payload['gap']] if 'gap' in payload else [])
-    aliases.update({q['gap_id']: f'G{i+1}' for i, q in enumerate(questions)})
+    reserved = set(re.findall(r'(?<!\w)[CEG]\d+(?!\w)', json.dumps(payload, ensure_ascii=False)))
+    aliases = {}
+    for prefix, identifiers in [('C', claims), ('E', evidence), ('G', [q['gap_id'] for q in questions])]:
+        index = 1
+        for identifier in dict.fromkeys(identifiers):
+            while f'{prefix}{index}' in reserved:
+                index += 1
+            aliases[identifier] = f'{prefix}{index}'
+            index += 1
     reverse = {value: key for key, value in aliases.items()}
     def transform(value, mapping):
-        if isinstance(value, str):
-            if value in mapping:
-                return mapping[value]
-            pattern = r'(?<![\w])(?:' + '|'.join(re.escape(k) for k in sorted(mapping, key=len, reverse=True)) + r')(?![\w])'
-            return re.sub(pattern, lambda match: mapping[match.group()], value) if mapping else value
-        if isinstance(value, list):
-            return [transform(v, mapping) for v in value]
-        if isinstance(value, dict):
-            return {key: transform(v, mapping) for key, v in value.items()}
-        return value
+        if not mapping:
+            return value
+        keys = '|'.join(re.escape(k) for k in sorted(mapping, key=len, reverse=True))
+        pattern = re.compile(r'(?<![\w])(?:' + keys + r')(?![\w])')
+
+        def visit(node):
+            if isinstance(node, str):
+                return pattern.sub(lambda match: mapping[match.group()], node)
+            if isinstance(node, list):
+                return [visit(v) for v in node]
+            if isinstance(node, dict):
+                return {k: v if k in {'text', 'excerpt'} else visit(v) for k, v in node.items()}
+            return node
+
+        return visit(value)
     result = await tasks.ask(role, instruction + ' 仅引用本次给定的C主张、E证据和G缺口编号，不要自己生成编号。',
                              transform(payload, aliases), schema)
     return schema.model_validate(transform(result.model_dump(), reverse))
@@ -338,7 +350,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                 raise ValueError('通过论证核查必须有原文依据')
             target = groups[check.target_type][check.index]
             # A fulltext claim cannot be upgraded solely on an abstract or on unrelated papers.
-            if check.verdict == 'supported' and (any(supplied[eid].source_level == 'abstract' for eid in target.evidence_ids)
+            if check.verdict == 'supported' and (any(supplied[eid].source_level == 'abstract' for eid in [*target.evidence_ids, *check.evidence_ids])
                     or not {supplied[eid].paper_id for eid in target.evidence_ids} <= {supplied[eid].paper_id for eid in check.evidence_ids}):
                 check.verdict = 'qualified'
                 check.reason += '；摘要或核查来源覆盖不足，不能视为完整验证'
@@ -350,12 +362,25 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             seen.add(key)
         if seen != expected:
             raise ValueError('论证核查遗漏对象，保留待审状态')
+        # A rejected external link cannot establish a conclusion that relies on that link.
+        approved_links = set()
         for check in review.checks:
-            if check.target_type == 'insight' and check.verdict != 'supported':
-                value = result['insights'][check.index]
-                if value['epistemic_status'] == 'supported_inference':
-                    value['proposed_epistemic_status'] = 'supported_inference'
-                    value['epistemic_status'] = 'hypothesis'
+            if check.target_type == 'external_support' and check.verdict == 'supported':
+                support = draft.external_support[check.index]
+                approved_links.update((support.argument_index, support.gap_id, eid) for eid in support.evidence_ids)
+        for check in review.checks:
+            if check.verdict != 'supported' or check.target_type == 'external_support':
+                continue
+            target = groups[check.target_type][check.index]
+            if check.target_type == 'argument':
+                usable = {eid for i, _, eid in approved_links if i == check.index}
+            elif target.epistemic_status == 'supported_inference':
+                usable = {eid for i, gid, eid in approved_links if i in target.argument_indices and gid in target.gap_ids}
+            else:
+                continue
+            if any(supplied[eid].paper_id in external_ids and eid not in usable for eid in target.evidence_ids):
+                check.verdict = 'qualified'
+                check.reason += '；依赖的外部佐证尚未通过独立核查'
         checked = []
         for check in review.checks:
             record = check.model_dump(exclude={'citation_verdict'})
