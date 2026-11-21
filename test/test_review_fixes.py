@@ -145,7 +145,7 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
         tasks.visual_catalog={'p':[{'page':1,'captions':[],'visual_content':False},{'page':3,'captions':['figure:2'],'visual_content':True}]}
         tasks.visual_pages={('p',3):{'url':'image','image_version':'i','source_version':'s'}}
         evidence=EvidenceSpan(id='e',paper_id='p',version='v',text='See Figure 2 for the result.',source_level='full_text',page_start=1)
-        images,context,missing=verification_images(tasks,[evidence],claim('p'))
+        images,context,missing=verification_images(tasks,[evidence],claim('p').model_copy(update={'evidence_ids':['e']}))
         self.assertEqual(images,['image']);self.assertEqual(context[0]['page'],3);self.assertFalse(missing)
 
     async def test_visual_budget_leaves_pages_for_later_papers(self):

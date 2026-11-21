@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock, Mock
 
 from src.llm import ModelConfig, StreamCallbacks, make_provider
 
@@ -29,6 +30,23 @@ class FakeAnthropicClient:
 
 
 class LLMAdaptersTest(unittest.IsolatedAsyncioTestCase):
+    async def test_close_owned_clients_awaits_async_close_and_preserves_borrowed_clients(self):
+        config = ModelConfig.from_dict({
+            "providers": {"openai": {"api_key": "k"}},
+            "agents": {"default_agent": {"model_name": "gpt-5-mini", "provider": "openai"}},
+        })
+        for method, close in (("close", AsyncMock()), ("aclose", AsyncMock()), ("close", Mock())):
+            with self.subTest(method=method, asynchronous=isinstance(close, AsyncMock)):
+                client = type("Client", (), {method: close})()
+                snapshot = make_provider(config, client=client)
+                await snapshot.aclose()
+                close.assert_not_called()
+                snapshot.provider._owns_client = True
+                await snapshot.aclose()
+                close.assert_called_once_with()
+                if isinstance(close, AsyncMock):
+                    close.assert_awaited_once_with()
+
     async def test_openai_compat_uses_sdk_chat_completion_request(self):
         client = FakeOpenAIClient({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
         config = ModelConfig.from_dict(

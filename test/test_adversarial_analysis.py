@@ -123,14 +123,14 @@ class AdversarialTest(unittest.IsolatedAsyncioTestCase):
         _, audit = await supplement_sources(task, [item()], ModelTasks(FakeModel(), ResearchOptions()))
         service.async_search.assert_not_awaited()
         self.assertFalse(audit["attempted"])
-        with self.assertRaises(ValueError):
-            ResearchOptions.from_constraints({"allow_external_search": True})
+        self.assertTrue(ResearchOptions.from_constraints({"allow_external_search": True}).allow_external_search)
 
     async def test_external_search_is_bounded_and_resume_does_not_repeat(self):
         service = SimpleNamespace(async_search=AsyncMock(return_value=SearchResponse(query="Q", papers=[PaperDocument(id=f"p{i}", title=f"P{i}", abstract="Abstract") for i in range(2, 6)])))
         options = ResearchOptions.from_constraints({"cross_paper_enabled": True, "allow_external_search": True, "external_paper_limit": 2})
         task = state(FakeModel(), cross_paper_enabled=True, allow_external_search=True)
         task["research_search_service"] = service
+        task['research_challenges'] = [{'claim_id':'c', 'statement':'effect', 'premise':'matched budget', 'required_test':'independent ablation'}]
         with patch("src.research.supplement.async_download_paper_fulltext", AsyncMock(return_value=SimpleNamespace(file_path=None))):
             items, audit = await supplement_sources(task, [item()], ModelTasks(FakeModel(), options))
         self.assertEqual(len(items), 3)

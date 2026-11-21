@@ -59,7 +59,7 @@ def inspect_pdf(path, limit, query=""):
                     continue
                 candidates.append({"page": index+1, "scanned": scanned, "captions": sorted(captions), "visual_content": bool(scanned or image_area or captions),
                     "source_version": source_hash,
-                    "priority": (int(bool(captions & wanted)), int(scanned), int(bool(captions)), int(image_area > 0))})
+                    "priority": (int(bool(captions & wanted)), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
         ordered = sorted(candidates, key=lambda p: (tuple(-x for x in p['priority']), p['page']))
         for metadata in ordered[:limit]:
             with closing(document[metadata['page']-1]) as page:
@@ -153,7 +153,9 @@ async def prepare_visual(tasks, item, evidence):
 def verification_images(tasks, raw, target):
     images, context, missing, requested = [], [], [], []
     target_text = getattr(target, "statement", getattr(target, "rationale", ""))
-    for span in raw:
+    core_ids = set(target.evidence_ids)
+    core = [s for s in raw if s.id in core_ids]
+    for span in core:
         catalog = tasks.visual_catalog.get(span.paper_id, [])
         references = labels(span.text + " " + target_text)
         resolved = {p['page'] for p in catalog if references.intersection(p['captions'])}

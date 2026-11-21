@@ -394,7 +394,9 @@ class LLMProvider(ABC):
             else:
                 close = getattr(self.client, "close", None)
                 if close is not None:
-                    close()
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
         self._close_sync_runner()
 
     def _run_async_compat(self, awaitable: Awaitable[Any]) -> Any:

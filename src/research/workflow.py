@@ -16,6 +16,7 @@ from .visual import prepare_visual
 from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
+from .reasoning import plan_arguments, research_questions, synthesize, render_reasoning
 from .incremental import IncrementalPlan, policy_version, dependency_manifest
 
 
@@ -82,6 +83,9 @@ def run_research_node():
             lambda role, usage: reporter.progress("模型任务已完成", role=role, **usage) if reporter else None)
         store = ResearchStore(state, reporter)
         items = list(state.get("read_results") or [])
+        primary_ids = {str(i.get('paper', {}).get('paperId') or i.get('paper', {}).get('id')) for i in items if i.get('source_role') != 'external_candidate'}
+        tasks.reading_call_reserve = min(3 * len(primary_ids), options.max_calls // 4) if options.reasoning_enabled else 0
+        tasks.reading_time_reserve = min(120, options.timeout_seconds // 4) if options.reasoning_enabled and options.timeout_seconds > 60 else 0
         external_search = (state.get("read_resume_checkpoint") or {}).get("external_search") or {"attempted": False, "status": "disabled", "added_paper_ids": [], "warnings": []}
         revision = (state.get("read_resume_checkpoint") or {}).get("revision")
         parent_report = None
@@ -265,7 +269,7 @@ def run_research_node():
                     reporter.progress(f"已完成《{title}》的逐篇阅读核查", paper_id=paper_id)
                 return card
 
-        pending = [asyncio.create_task(process(*value)) for value in inputs]
+        pending = [asyncio.create_task(process(*value)) for value in inputs if value[0] in primary_ids or options.cross_paper_enabled]
         try:
             cards = await asyncio.gather(*pending)
         finally:
@@ -288,15 +292,28 @@ def run_research_node():
                     challenges.append({"claim_id": claim.id, "claim_version": claim.version,
                         "statement": claim.statement, "premise": claim.conditions,
                         "required_test": "查找相同任务和实验条件下的独立比较、消融或反例", "alternative_explanation": "实验支持尚未确认", "evidence_ids": claim.evidence_ids})
-        acquisition_state = {**state, "research_challenges": challenges}
+        argument_plans = []
+        if options.reasoning_enabled:
+            for card in cards:
+                if card.paper_id in primary_ids:
+                    key = version_of({'card': card.model_dump(), 'source': source_manifests.get(card.paper_id), 'policy': policy})
+                    previous_plan = next((p for p in (parent_report or {}).get('argument_plans', []) if p.get('dependency_version') == key and p.get('status') == 'planned'), None)
+                    argument_plan = dict(previous_plan) if previous_plan else await plan_arguments(tasks, request.topic, card,
+                        [e for e in all_evidence if e.paper_id == card.paper_id])
+                    argument_plan['dependency_version'] = key
+                    argument_plans.append(argument_plan)
+        questions = research_questions(argument_plans, cards) if options.reasoning_enabled else challenges
+        acquisition_state = {**state, "research_challenges": questions,
+            "research_planning_failed": options.reasoning_enabled and any(p['status'] != 'planned' for p in argument_plans)}
         previous_count = len(inputs)
         previous_items = len(items)
         items, external_search = await supplement_sources(acquisition_state, items, tasks)
         tasks.remaining_visual_papers = sum(str(i.get('full_text', {}).get('source_path', '')).lower().endswith('.pdf') for i in items[previous_items:])
         for item in items[previous_items:]:
             await prepare_input(item)
-        for value in inputs[previous_count:]:
-            cards.append(await process(*value))
+        if options.cross_paper_enabled:
+            for value in inputs[previous_count:]:
+                cards.append(await process(*value))
         checkpoint.update(read_results=items, external_search=external_search)
         state['read_resume_checkpoint'] = checkpoint
         await store.save('research_checkpoint', checkpoint)
@@ -353,6 +370,18 @@ def run_research_node():
                         "relations": [r.model_dump() for r in relations[pair_start:]], "verifications": [v.model_dump() for v in checks[pair_start:]]})
                 except (ValueError, RuntimeError, TimeoutError) as exc:
                     warnings.append(str(exc))
+        reasoning = []
+        if options.reasoning_enabled:
+            external_ids = {str(i['paper'].get('paperId') or i['paper'].get('id')) for i in items if i.get('source_role') == 'external_candidate'}
+            for argument_plan in argument_plans:
+                card = next(c for c in cards if c.paper_id == argument_plan['paper_id'])
+                # A candidate belongs only to the questions that acquired it, not every primary paper.
+                linked = {str(i['paper'].get('paperId') or i['paper'].get('id')) for i in items
+                    if i.get('source_role') == 'external_candidate' and card.paper_id in i.get('support_for_paper_ids', [])}
+                reasoning.append(await synthesize(tasks, request.topic, card, argument_plan, all_evidence, external_ids & linked, policy,
+                    previous=next((r for r in (parent_report or {}).get('reasoning', []) if r['paper_id'] == card.paper_id), None),
+                    source_manifests=source_manifests))
+            await store.save('research_reasoning', reasoning)
         assessments = [assess_card(card, options) for card in cards]
         matrix, relation_graph = comparison_views(cards, relations, checks)
         sections = []
@@ -367,7 +396,8 @@ def run_research_node():
             if assessment["weighted_score"] is not None:
                 text += f"\n评分目标：{assessment['goal']}；加权分：{assessment['weighted_score']}"
             sections.append(text)
-            await store.save("paper_report", text, name=f"paper_{version_of(card.paper_id)}.md")
+            per_paper_reasoning = [r for r in reasoning if r["paper_id"] == card.paper_id]
+            await store.save("paper_report", (render_reasoning(per_paper_reasoning) + "\n\n" if per_paper_reasoning else "") + text, name=f"paper_{version_of(card.paper_id)}.md")
         if relations:
             lines = ["# 跨论文关系分析"]
             for relation, check in zip(relations, checks):
@@ -475,9 +505,12 @@ def run_research_node():
             warnings.append(f"预算不足，{omitted_pairs} 个候选主张对尚未比较。")
         retrieval_status = retrieval.diagnostics() if retrieval else {"status": "not_configured", "warnings": [state.get("research_index_warning") or "未配置向量服务，使用原文分块阅读与引用回查。"]}
         warnings.extend(retrieval_status["warnings"])
-        title = "研究分析报告" if cross_enabled else "逐篇阅读报告"
+        if reasoning:
+            sections.insert(0, render_reasoning(reasoning))
+            warnings.extend(w for result in reasoning for w in result['warnings'])
+        title = "研究分析报告" if cross_enabled or reasoning else "逐篇阅读报告"
         markdown = f"# {title}\n\n" + "\n\n".join([*("> " + w for w in dict.fromkeys(warnings)), *sections])
-        references = [i["paper"] for i in items if str(i.get("paper", {}).get("paperId") or i.get("paper", {}).get("id")) in {c.paper_id for c in cards}]
+        references = [i["paper"] for i in items if str(i.get("paper", {}).get("paperId") or i.get("paper", {}).get("id")) in ({c.paper_id for c in cards} | set(external_search["added_paper_ids"]))]
         if references:
             entries = []
             for paper in references:
@@ -492,7 +525,7 @@ def run_research_node():
             record = {k: v for k, v in revision.items() if k not in {"history", "seed_card", "evidence_versions"}}
             record["result_claims"] = [{"id": c.id, "version": c.version} for card in cards if card.paper_id == revision["target"]["paper_id"] for c in card.claims]
             revision_history = [*revision.get("history", []), record]
-        report = {"schema_version": 4, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
+        report = {"schema_version": 5, "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
             "dependencies": dependency_manifest(cards, relations, paragraphs, all_evidence, source_manifests),
             "challenges": challenges, "pair_outcomes": pair_outcomes, "visual": visual_audits, "visual_model": getattr(llm, "signature", None), "output_mode": options.output_mode, "cross_paper_executed": cross_enabled,
             "assessments": assessments, "comparison_matrix": matrix, "relation_graph": relation_graph,

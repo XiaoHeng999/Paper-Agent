@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { Claim, Evidence, Relation, ResearchReport } from "../../types/research";
+import type { Claim, Evidence, Relation, ResearchReport, ResearchReasoning } from "../../types/research";
 import type { SessionRunAccepted } from "../../types/sessions";
 const props = defineProps<{ sessionKey: string; artifactId: string; busy: boolean }>();
 const emit = defineEmits<{ revision: [value: SessionRunAccepted] }>();
@@ -31,8 +31,12 @@ watch(() => [props.sessionKey, props.artifactId], async () => {
 }, { immediate: true });
 const nodes = computed(() => report.value?.relation_graph?.nodes ?? []);
 const edges = computed(() => report.value?.relation_graph?.edges ?? []);
-const labels: Record<string, string> = {equivalent: "同质", extends: "扩展", supports: "支持", conflicts: "冲突", different_scope: "条件不同", incomparable: "无法比较", verified: "当前证据支持", qualified: "需限定", contradicted: "与证据不符", insufficient_evidence: "证据不足", needs_human_review: "待人工复核", supported: "支持", unknown: "未证实", matched: "匹配", different: "不同"};
+const labels: Record<string, string> = {equivalent: "同质", extends: "扩展", supports: "支持", conflicts: "冲突", different_scope: "条件不同", incomparable: "无法比较", verified: "当前证据支持", qualified: "需限定", contradicted: "与证据不符", insufficient_evidence: "证据不足", needs_human_review: "待人工复核", supported: "支持", unknown: "未证实", hypothesis: "待验证假设", proposal: "研究建议", supported_inference: "证据推论", unsupported: "不支持", unreviewed: "待审", inconclusive: "不足以判断", challenges: "挑战", different_conditions: "条件不同", matched: "匹配", different: "不同"};
 function label(value: string) { return labels[value] ?? value; }
+function reasoningCheck(result: ResearchReasoning, kind: string, index: number) {
+  const check = result.checks.find(c => c.target_type === kind && c.index === index);
+  return check ? `${label(check.verdict)}：${check.reason}` : '尚未完成独立核查';
+}
 function showEvidence(ids: string[]) { evidence.value = (report.value?.evidence ?? []).filter(e => ids.includes(e.id)); }
 function selectRelation(edge: Relation) { selectedRelation.value = edge; showEvidence(edge.evidence_ids); }
 function position(id: string) {
@@ -66,6 +70,33 @@ async function revise() {
     <p v-if="loading">正在读取研究对象…</p><p v-if="error" role="alert">{{ error }}</p>
     <template v-if="report">
       <p>评价仅针对已读取来源；unknown 表示证据或核查不足。人工修订将生成新报告，原记录保留。</p>
+      <section v-for="result in report.reasoning ?? []" :key="result.paper_id" class="reasoning">
+        <h4>核心论证与 Insight · {{ result.paper_id }}</h4>
+        <p>系统推论和假设不等于作者结论；核查支持不表示已经独立复现。</p>
+        <p v-for="warning in result.warnings" :key="warning">{{ warning }}</p>
+        <article v-for="(argument, index) in result.arguments" :key="argument.claim_id">
+          <h5>{{ argument.thesis }}</h5>
+          <p>推理：{{ argument.inference }}</p><p>条件：{{ argument.conditions }}</p>
+          <p>替代解释：{{ argument.alternative_explanation }}</p><p>证伪条件：{{ argument.falsification }}</p>
+          <p>结论：{{ argument.conclusion }}</p><p>{{ reasoningCheck(result, 'argument', index) }}</p>
+          <p v-for="gap in argument.gaps" :key="gap.question">待补证：{{ gap.question }}；影响：{{ gap.why_material }}；停止标准：{{ gap.stopping_rule }}</p>
+          <button type="button" @click="showEvidence(argument.evidence_ids)">查看论证原文</button>
+        </article>
+        <article v-for="(support, index) in result.external_support" :key="`support-${index}`">
+          <h5>论证 {{ support.argument_index + 1 }} 的外部证据：{{ label(support.relation) }}</h5>
+          <p>{{ support.contribution }}</p><p>可比性：{{ support.comparability }}</p>
+          <p>{{ reasoningCheck(result, 'external_support', index) }}</p>
+          <button type="button" @click="showEvidence(support.evidence_ids)">查看外部证据</button>
+        </article>
+        <article v-for="(insight, index) in result.insights" :key="`insight-${index}`">
+          <h5>{{ label(insight.epistemic_status) }}：{{ insight.statement }}</h5>
+          <p>推导：{{ insight.derivation }}</p><p>不确定性：{{ insight.uncertainty }}</p>
+          <p>验证实验：{{ insight.distinguishing_test }}</p><p>{{ reasoningCheck(result, 'insight', index) }}</p>
+          <button type="button" @click="showEvidence(insight.evidence_ids)">查看推导依据</button>
+        </article>
+        <p v-if="!result.insights.length">未形成可交付的 Insight，不强行补齐。</p>
+        <p v-if="result.omitted_evidence_ids.length">本阶段尚未覆盖 {{ result.omitted_evidence_ids.length }} 个证据片段。</p>
+      </section>
       <p v-if="report.revision_history?.length">已记录 {{ report.revision_history.length }} 次人工修订。</p>
       <p v-if="report.incremental?.enabled">本次更新复用了 {{ report.incremental.reused.cards ?? 0 }} 篇阅读结果、{{ report.incremental.reused.claim_checks ?? 0 }} 条主张核查、{{ report.incremental.reused.pairs ?? 0 }} 组关系及 {{ report.incremental.reused.paragraphs ?? 0 }} 段正文。{{ report.incremental.reason }}</p>
       <details v-if="report.visual?.some(v => v.status !== 'not_applicable')">

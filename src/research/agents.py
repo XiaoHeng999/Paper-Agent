@@ -9,7 +9,7 @@ from typing import Any
 from src.llm.base import normalize_token_usage
 from .context import ScopedEvidence
 from .models import (
-    Claim, ClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
+    Claim, ClaimDraft, ClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
     VerificationResult, ResearchOptions, version_of,
     ReportParagraph, ComparisonAxis, AXES,
 )
@@ -33,13 +33,20 @@ class ModelTasks:
         self.deadline = time.monotonic() + options.timeout_seconds
         self.semaphore = asyncio.Semaphore(2)
         self.usage = {"input_tokens": 0, "output_tokens": 0}
+        self.terminal_error = None
 
     async def ask(self, role: str, instruction: str, payload: dict, schema, *, images=None):
         async with self.semaphore:
             if self.cancellation:
                 self.cancellation.raise_if_requested()
+            if self.terminal_error:
+                raise RuntimeError(self.terminal_error)
             remaining = self.deadline - time.monotonic()
-            if remaining <= 0 or self.calls >= self.options.max_calls:
+            reading = role in {'paper_reader', 'evidence_verifier', 'cross_paper_analyst', 'visual_transcription'}
+            if reading:
+                remaining -= getattr(self, 'reading_time_reserve', 0)
+            call_limit = self.options.max_calls - (getattr(self, 'reading_call_reserve', 0) if reading else 0)
+            if remaining <= 0 or self.calls >= call_limit:
                 raise BudgetExceeded("研究任务调用次数或时间预算已用尽")
             if self.llm is None:
                 raise RuntimeError("未配置研究模型")
@@ -67,11 +74,24 @@ class ModelTasks:
                 self.usage_callback(role, usage)
             if self.cancellation:
                 self.cancellation.raise_if_requested()
-            if not getattr(response, "ok", True) or getattr(response, "finish_reason", None) in {"length", "max_tokens"}:
+            if not getattr(response, "ok", True):
+                status = getattr(response, "error_status_code", None)
+                if status in {401, 402, 403}:
+                    self.terminal_error = f"研究模型请求被拒绝（HTTP {status}），本轮停止后续模型调用；请检查凭据、余额或访问权限"
+                    raise RuntimeError(self.terminal_error)
+                raise ValueError(f"研究模型返回错误（HTTP {status or 'unknown'}）")
+            if getattr(response, "finish_reason", None) in {"length", "max_tokens"}:
                 raise ValueError("研究模型返回错误或截断响应")
             content = response.content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            # Salvage individually validated reader claims; never silently claim full coverage.
+            if schema is ClaimBatch:
+                value = json.loads(content)
+                if isinstance(value, dict) and isinstance(value.get("claims"), list) and len(value["claims"]) > 25:
+                    value["claims"] = value["claims"][:25]
+                    value["uncovered_evidence_ids"] = list(dict.fromkeys([*value.get("uncovered_evidence_ids", []), *payload.get("primary_evidence_ids", [])]))
+                    return schema.model_validate(value)
             return schema.model_validate_json(content)
 
 
@@ -86,11 +106,14 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
             anchors.append(candidate)
             remaining -= len(candidate.text)
     supplied_ids = set(evidence_ids) | {e.id for e in anchors}
-    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正，不能用跨篇知识补全。", {
+    schema = ClaimDraft if feedback else ClaimBatch
+    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。", {
         "question": question, "paper_id": paper_id,
         "evidence": [item.model_dump() for item in evidence], "context_evidence": [item.model_dump() for item in anchors],
         "primary_evidence_ids": evidence_ids, "feedback": feedback,
-    }, ClaimBatch)
+    }, schema)
+    if feedback:
+        batch = ClaimBatch(claims=[batch])
     if not set(batch.uncovered_evidence_ids) <= set(evidence_ids):
         raise ValueError("Reader 遗漏清单越过本次主证据范围")
     gaps = tasks.reading_gaps.setdefault(paper_id, set())
@@ -136,6 +159,15 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
             if observation.status == 'contradicts':
                 draft.verdict = 'contradicted'
                 draft.repair_request = draft.repair_request or '根据原图中的反证修正判断'
+        # Expanded context is not automatically a visual dependency. Once a verifier
+        # actually cites it, however, its charts must not bypass original-page checks.
+        cited_ids = list(dict.fromkeys([*target.evidence_ids, *draft.evidence_ids,
+            *(eid for facet in (draft.fidelity, draft.experimental_support, draft.counterevidence) for eid in facet.evidence_ids)]))
+        cited_target = target.model_copy(update={'evidence_ids': cited_ids})
+        _, cited_pages, cited_missing = verification_images(tasks, raw, cited_target)
+        visual_missing.extend(cited_missing)
+        visual_missing.extend(f"{p['paper_id']} 第 {p['page']} 页新增引用的图像尚未核查" for p in cited_pages
+            if (p['paper_id'], p['page'], p['image_version']) not in supplied_pages)
         if supplied_pages - observed_pages:
             visual_missing.append("已附原图但缺少逐页可定位的视觉观察")
         if visual_missing:
@@ -199,7 +231,8 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
         if "abstract" in levels:
             draft.unchecked.append("仅有摘要证据的论文未完成全文实验核查")
     except (ValueError, RuntimeError, TimeoutError) as exc:
-        draft = VerificationDraft(verdict="insufficient_evidence", reason=str(exc), evidence_ids=[], unchecked=["本次语义核查未完成"])
+        reason = str(exc).strip() or ("语义核查超时，未完成本次判断" if isinstance(exc, TimeoutError) else f"语义核查失败：{type(exc).__name__}")
+        draft = VerificationDraft(verdict="insufficient_evidence", reason=reason, evidence_ids=[], unchecked=["本次语义核查未完成"])
     return VerificationResult(**draft.model_dump(), visual_pages=visual_context, target_id=target.id, target_version=target.version, scope=scope, source_levels=levels, inspected_evidence_ids=[x.id for x in raw], omitted_evidence_ids=omitted)
 
 

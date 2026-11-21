@@ -83,6 +83,7 @@ export interface SessionConstraints {
   visual_verification?: boolean;
   visual_page_limit?: number;
   allow_external_search?: boolean;
+  research_reasoning_enabled?: boolean;
   external_paper_limit?: number;
   scoring_goal?: string;
   score_weights?: Record<string, number>;

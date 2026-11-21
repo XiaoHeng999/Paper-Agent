@@ -22,6 +22,7 @@ class ResearchOptions:
     context_chars: int = 24000
     allow_external_search: bool = False
     external_paper_limit: int = 2
+    reasoning_enabled: bool = True
     visual_verification: bool = True
     visual_page_limit: int = 6
     scoring_goal: str = ""
@@ -53,8 +54,9 @@ class ResearchOptions:
         external = constraints.get("allow_external_search", False)
         if type(external) is not bool:
             raise ValueError("allow_external_search 必须是布尔值")
-        if external and not enabled:
-            raise ValueError("外部反证补搜必须先允许跨论文分析")
+        reasoning = constraints.get("research_reasoning_enabled", True)
+        if type(reasoning) is not bool:
+            raise ValueError("research_reasoning_enabled 必须是布尔值")
         external_limit = constraints.get("external_paper_limit", 2)
         if type(external_limit) is not int or not 1 <= external_limit <= 3:
             raise ValueError("external_paper_limit 必须是 1 到 3 的整数")
@@ -81,7 +83,7 @@ class ResearchOptions:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"research_{key} 必须是 {low} 到 {high} 的整数")
             limits[key] = value
-        return cls(visual_verification=visual, visual_page_limit=page_limit, output_mode=mode, cross_paper_enabled=enabled, allow_external_search=external, external_paper_limit=external_limit, scoring_goal=goal.strip(), score_weights=weights, **limits)
+        return cls(reasoning_enabled=reasoning, visual_verification=visual, visual_page_limit=page_limit, output_mode=mode, cross_paper_enabled=enabled, allow_external_search=external, external_paper_limit=external_limit, scoring_goal=goal.strip(), score_weights=weights, **limits)
 
 
 class Record(BaseModel):

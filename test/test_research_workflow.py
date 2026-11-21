@@ -39,6 +39,14 @@ class FakeModel:
             value = {"claims": [{"statement": "在小样本下有效" if payload.get("feedback") else "有效",
                 "kind": "result", "conditions": "小样本", "experiment": "数据集 D，基线 B，准确率",
                 "evidence_ids": [payload["evidence"][0]["id"]]}]}
+            if payload.get('feedback'):
+                value = value['claims'][0]
+        elif role == "argument_builder":
+            value = {'arguments': []}
+        elif role == "research_synthesis":
+            value = {'arguments': [], 'insights': [], 'external_support': []}
+        elif role == "reasoning_verifier":
+            value = {'checks': []}
         elif role == "evidence_verifier":
             qualified = self.qualified and payload["target"].get("statement") == "有效"
             value = {"verdict": "qualified" if qualified else "verified", "reason": "原文仅支持小样本条件",
@@ -62,11 +70,31 @@ def item(paper_id="p1", abstract="Results apply to small samples."):
 
 
 def state(model, papers=None, **constraints):
-    return {"request": ResearchRequest("方法有效吗", {"output_mode": "paper_report", "cross_paper_enabled": False, **constraints}),
+    return {"request": ResearchRequest("方法有效吗", {"output_mode": "paper_report", "cross_paper_enabled": False, "research_reasoning_enabled": False, **constraints}),
             "read_results": papers if papers is not None else [item()], "research_node_llm": model}
 
 
 class ResearchWorkflowTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_timeout_preserves_report_and_marks_verification_incomplete(self):
+        class TimeoutModel(FakeModel):
+            async def chat(self, messages, **kwargs):
+                if json.loads(messages[-1]["content"])["role"] == "evidence_verifier":
+                    raise TimeoutError()
+                return await super().chat(messages, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = SQLiteSessionRepository(storage_root=directory)
+            session = repo.create()
+            task = state(TimeoutModel())
+            task.update(session_repo=repo, session_key=session.key, turn_id="timeout-case")
+            result = await run_research_node()(task)
+            check = result["research_report"]["cards"][0]["verifications"][0]
+            self.assertEqual(check["verdict"], "insufficient_evidence")
+            self.assertIn("超时", check["reason"])
+            self.assertIn("本次语义核查未完成", check["unchecked"])
+            self.assertTrue(result["research_markdown"])
+            self.assertTrue(any(a["artifact_type"] == "research_state" for a in repo.get(session.key).artifacts))
+
     async def test_single_paper_verifies_without_cross_analysis(self):
         model = FakeModel()
         result = await run_research_node()(state(model))
@@ -166,7 +194,7 @@ class ResearchWorkflowTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(graph_module, "run_read_node", return_value=read):
             result = await graph_module.run_graph(ResearchRequest("read", {"papers": [{"id": "p1", "title": "P"}]}), state_overrides={"research_node_llm": FakeModel()})
         self.assertEqual(set(build_graph().nodes) - {"__start__"}, {"run_search_agent", "run_read", "run_research", "compose_reply"})
-        self.assertIn("逐篇阅读报告", result.state["assistant_message"])
+        self.assertIn("核心论证与研究见解", result.state["assistant_message"])
 
 
 class ContextTest(unittest.TestCase):
@@ -327,7 +355,7 @@ class ResearchApiTest(unittest.TestCase):
             final = next(x for x in artifacts if x["artifact_type"] == "final_report")
             downloaded = client.get(f"/api/sessions/{session.key}/artifacts/{final['id']}")
             self.assertEqual(downloaded.status_code, 200)
-            self.assertIn("逐篇阅读报告", downloaded.text)
+            self.assertIn("核心论证与研究见解", downloaded.text)
             self.assertTrue(any(x["artifact_type"] == "research_checkpoint" for x in artifacts))
 
 

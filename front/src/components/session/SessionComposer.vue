@@ -140,7 +140,6 @@ function updateWeight(key: string, event: Event) {
 }
 function updateCrossPermission(event: Event) {
   const next = {...props.constraints, cross_paper_enabled: (event.target as HTMLInputElement).checked};
-  if (!next.cross_paper_enabled) next.allow_external_search = false;
   emit("update:constraints", next);
 }
 
@@ -189,7 +188,7 @@ function onKeydown(event: KeyboardEvent) {
       <label><input type="checkbox" :checked="constraints.cross_paper_enabled ?? false" @change="updateCrossPermission" />允许跨论文分析</label>
       <label><input type="checkbox" :checked="constraints.visual_verification ?? true" @change="updateConstraint('visual_verification', ($event.target as HTMLInputElement).checked)" />核查 PDF 图表与扫描原页（需模型支持图像）</label>
       <label>每篇视觉候选页上限 <input type="number" min="1" max="20" :value="constraints.visual_page_limit ?? 6" @change="updateConstraint('visual_page_limit', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><input type="checkbox" :disabled="!constraints.cross_paper_enabled" :checked="constraints.allow_external_search ?? false" @change="updateConstraint('allow_external_search', ($event.target as HTMLInputElement).checked)" />允许外部反证补搜（默认最多补入 2 篇候选论文）</label>
+      <label><input type="checkbox" :checked="constraints.allow_external_search ?? false" @change="updateConstraint('allow_external_search', ($event.target as HTMLInputElement).checked)" />允许按需查阅外部论文佐证（无需开启跨篇比较，最多补入 2 篇）</label>
       <details><summary>可选：指定评分目标与权重</summary>
         <label>评分目标<input :value="constraints.scoring_goal ?? ''" placeholder="例如：选择优先复现的论文" @input="updateConstraint('scoring_goal', ($event.target as HTMLInputElement).value)" /></label>
         <label v-for="[key, title] in scoringDimensions" :key="key">{{ title }}<input type="number" min="0" step="0.1" :value="constraints.score_weights?.[key] ?? ''" placeholder="不计入总分" @input="updateWeight(key, $event)" /></label>
