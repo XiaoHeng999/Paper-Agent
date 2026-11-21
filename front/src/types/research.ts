@@ -1,5 +1,5 @@
-export interface Argument { claim_id: string; thesis: string; inference: string; conditions: string; alternative_explanation: string; falsification: string; conclusion: string; evidence_ids: string[]; gaps: Array<{question: string; why_material: string; stopping_rule: string}> }
-export interface Insight { gap_ids?: string[]; prediction?: string; weakening_observation?: string; statement: string; epistemic_status: string; derivation: string; uncertainty: string; distinguishing_test: string; evidence_ids: string[] }
+export interface Argument { flow_edge_indices?: number[]; claim_id: string; thesis: string; inference: string; conditions: string; alternative_explanation: string; falsification: string; conclusion: string; evidence_ids: string[]; gaps: Array<{question: string; why_material: string; stopping_rule: string}> }
+export interface Insight { flow_edge_indices?: number[]; claim_ids?: string[]; gap_ids?: string[]; prediction?: string; weakening_observation?: string; statement: string; epistemic_status: string; derivation: string; uncertainty: string; distinguishing_test: string; evidence_ids: string[] }
 export interface ReviewedCitation {
   sentence: string; scope: string; comparison: { baseline: string; metric: string } | null;
   overreach: string; evidence_id: string; excerpt: string; section: string;
@@ -15,7 +15,10 @@ export interface MethodStep {
   basis: 'exact' | 'approximation' | 'empirical' | 'hypothesis';
   justification: string; failure_or_test: string; evidence_ids: string[];
 }
-export interface ResearchReasoning { method_steps?: MethodStep[]; evidence_questions?: EvidenceQuestion[]; paper_id: string; status: string; arguments: Argument[]; insights: Insight[]; external_support: Array<{gap_id?: string; argument_index: number; relation: string; comparability: string; contribution: string; evidence_ids: string[]}>; checks: Array<{target_type: string; index: number; verdict: string; reason: string; judgment_update?: string; citation?: ReviewedCitation | null}>; warnings: string[]; omitted_evidence_ids: string[] }
+export interface ReadingPassage { title: string; explanation: string; claim_ids: string[]; evidence_ids: string[] }
+export interface FlowEdge { source: string; target: string; transfer: string; claim_ids: string[]; evidence_ids: string[] }
+export interface ReadingFigure { passage_index: number; number: number; page: number; caption_excerpt: string; url?: string }
+export interface ResearchReasoning { flow_scope?: string; flow_edges?: FlowEdge[]; reading_figures?: ReadingFigure[]; reading_guide?: ReadingPassage[]; method_steps?: MethodStep[]; evidence_questions?: EvidenceQuestion[]; paper_id: string; status: string; arguments: Argument[]; insights: Insight[]; external_support: Array<{gap_id?: string; argument_index: number; relation: string; comparability: string; contribution: string; evidence_ids: string[]}>; checks: Array<{target_type: string; index: number; verdict: string; reason: string; judgment_update?: string; citation?: ReviewedCitation | null}>; warnings: string[]; omitted_evidence_ids: string[] }
 export interface Evidence { modality?: string; id: string; paper_id: string; text: string; source_level: string; page_start: number | null; section: string }
 export interface Claim { id: string; version: string; paper_id: string; statement: string; conditions: string; experiment: string; study?: Record<string, string>; evidence_ids: string[] }
 export interface Check { status: string; reason: string; evidence_ids: string[] }

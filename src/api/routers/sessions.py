@@ -162,6 +162,8 @@ def _artifact_media_type(file_path: Path) -> str:
     """
 
     suffix = file_path.suffix.lower()
+    if suffix == ".png":
+        return "image/png"
     if suffix == ".md":
         return "text/markdown; charset=utf-8"
     if suffix == ".json":

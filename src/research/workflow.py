@@ -12,7 +12,7 @@ from .models import Claim, ClaimDraft, PaperCard, ResearchOptions, version_of
 from .retrieval import EvidenceIndex
 from .storage import ResearchStore, load_evidence
 from .supplement import supplement_sources
-from .visual import prepare_visual
+from .visual import prepare_visual, attach_reading_figures
 from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
@@ -446,6 +446,9 @@ def run_research_node():
                 reasoning.append(await synthesize(tasks, request.topic, card, argument_plan, all_evidence, external_ids & linked, policy,
                     previous=next((r for r in (parent_report or {}).get('reasoning', []) if r['paper_id'] == card.paper_id), None),
                     source_manifests=source_manifests))
+                source = next((item.get('full_text', {}).get('source_path') for item in items
+                               if str(item['paper'].get('paperId') or item['paper'].get('id')) == card.paper_id), None)
+                await attach_reading_figures(tasks, reasoning[-1], all_evidence, source, store)
             await store.save('research_reasoning', reasoning)
         assessments = [assess_card(card, options) for card in cards]
         matrix, relation_graph = comparison_views(cards, relations, checks)

@@ -1,6 +1,6 @@
 """Bounded, paper-scoped PDF rendering and original-page visual verification.
 
-Images stay in task memory, never in JSON reports or embedding collections.
+Page previews used by reading passages can be saved as session PNG artifacts.
 PDFium is serialized because the native library is not thread safe.
 """
 import asyncio
@@ -177,3 +177,66 @@ def verification_images(tasks, raw, target):
         images.append(page['url'])
         context.append({"paper_id": span.paper_id, "page": number, "image_version": page['image_version'], "source_version": page['source_version']})
     return images, context, missing
+
+
+def original_page_png(path, number, source_version):
+    """Render a display copy of the version catalogued during reading."""
+    import pypdfium2 as pdfium
+
+    with Path(path).open('rb') as stream:
+        data = stream.read(50 * 1024 * 1024 + 1)
+    if len(data) > 50 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != source_version:
+        raise ValueError('原 PDF 已变化，无法展示匹配的原页')
+    with _LOCK, pdfium.PdfDocument(data) as document, closing(document[number - 1]) as page:
+        with closing(page.render(scale=min(2, 1800 / max(page.get_size())))) as bitmap:
+            output = io.BytesIO()
+            bitmap.to_pil().save(output, format='PNG')
+            return output.getvalue()
+
+
+async def attach_reading_figures(tasks, result, evidence, source_path, store):
+    """Resolve proposed figures against caption-bearing primary spans and PDF catalog."""
+    from urllib.parse import quote
+
+    pid = result['paper_id']
+    catalog = {p['page']: p for p in tasks.visual_catalog.get(pid, [])}
+    spans = {e.id: e for e in evidence if e.paper_id == pid and e.source_level == 'full_text'}
+    assets = {}
+    figures = []
+    approved = {c['index'] for c in result.get('checks', []) if c['target_type'] == 'reading_passage'
+                and c['verdict'] in {'supported', 'qualified'}}
+    for index, passage in enumerate(result.get('reading_guide', [])):
+        n = passage.get('figure_number')
+        if not n or index not in approved:
+            continue
+        pattern = re.compile(rf'^\s*(?:fig(?:ure)?\.?|图)\s*{int(n)}(?!\d)\s*[|.:：—\-]\s*(.*)$', re.I | re.M)
+        for eid in passage['evidence_ids']:
+            span = spans.get(eid)
+            if not span or not span.page_start or span.page_end not in (None, span.page_start):
+                continue
+            match = pattern.search(span.text)
+            if not match:
+                continue
+            page = span.page_start
+            figure = dict(passage_index=index, number=n, page=page, caption_excerpt=match.group(0).strip()[:220],
+                          evidence_id=eid)
+            meta = catalog.get(page)
+            if page not in assets and len(assets) < 3 and meta and store.session and store.repo:
+                prepared = tasks.visual_pages.get((pid, page))
+                try:
+                    if prepared:
+                        data = base64.b64decode(prepared['url'].split(',', 1)[1])
+                    elif source_path:
+                        data = await asyncio.to_thread(original_page_png, source_path, page, meta['source_version'])
+                    else:
+                        data = None
+                    if data:
+                        asset = await store.save('research_figure_page', data, name=f'page-{page}.png')
+                        assets[page] = f"/api/sessions/{quote(store.session, safe='')}/artifacts/{quote(asset['id'], safe='')}"
+                except (OSError, ValueError, RuntimeError) as exc:
+                    result['warnings'].append(f'图 {n} 原页未能展示：{exc}')
+            if page in assets:
+                figure['url'] = assets[page]
+            figures.append(figure)
+            break
+    result['reading_figures'] = figures

@@ -98,7 +98,42 @@ METHOD_BASIS = {'exact': '定义或严格推导', 'approximation': '近似及其
                 'empirical': '实验观察', 'hypothesis': '待验证解释'}
 
 
+class FlowEdge(Record):
+    source: str = Field(min_length=1, max_length=32)
+    target: str = Field(min_length=1, max_length=32)
+    transfer: str = Field(min_length=1, max_length=48)
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+def connected_flow(edges):
+    if len(edges) < 2:
+        return False
+    adjacent = {}
+    for edge in edges:
+        adjacent.setdefault(edge.source, set()).add(edge.target)
+        adjacent.setdefault(edge.target, set()).add(edge.source)
+    pending = [edges[0].source]
+    seen = set()
+    while pending:
+        node = pending.pop()
+        if node not in seen:
+            seen.add(node)
+            pending.extend(adjacent[node] - seen)
+    return len(seen) == len(adjacent)
+
+
+class ReadingPassage(Record):
+    figure_number: int | None = Field(default=None, ge=1)
+    title: str = Field(min_length=1)
+    explanation: str = Field(min_length=1)
+    claim_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
 class Synthesis(Record):
+    flow_edges: list[FlowEdge] = Field(default_factory=list, max_length=9)
+    reading_guide: list[ReadingPassage] = Field(default_factory=list, max_length=5)
     method_steps: list[MethodStep] = Field(default_factory=list, max_length=5)
     arguments: list[Argument] = Field(max_length=4)
     insights: list[Insight] = Field(default_factory=list, max_length=4)
@@ -107,7 +142,7 @@ class Synthesis(Record):
 
 class ReasoningCheck(Record):
     citation_verdict: Literal['comparison', 'non_comparison', 'withhold'] = 'withhold'
-    target_type: Literal['argument', 'insight', 'external_support', 'method_step']
+    target_type: Literal['argument', 'insight', 'external_support', 'method_step', 'reading_passage', 'flow_edge']
     index: int = Field(ge=0)
     verdict: Literal['supported', 'qualified', 'unsupported']
     reason: str = Field(min_length=1)
@@ -115,7 +150,7 @@ class ReasoningCheck(Record):
 
 
 class ReasoningReview(Record):
-    checks: list[ReasoningCheck] = Field(max_length=19)
+    checks: list[ReasoningCheck] = Field(max_length=33)
 
 
 async def ask_scoped(tasks, role, instruction, payload, schema, claims, evidence):
@@ -302,7 +337,9 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                  'plan': version_of(plan), 'argument_only': argument_only, 'sources': {pid: (source_manifests or {}).get(pid) for pid in {card.paper_id, *external_ids}},
                  'available_evidence': {e.id: e.version for e in [*local, *external]}}}
     if previous and previous.get('status') == 'reviewed' and previous.get('dependencies') == result['dependencies']:
-        return {**previous, 'reused': True}
+        covered = {cid for p in previous.get('reading_guide', []) for cid in p['claim_ids']}
+        if argument_only or all(a['claim_id'] in covered for a in previous['arguments']):
+            return {**previous, 'reused': True}
     if not plan['arguments']:
         result['version'] = version_of(result)
         return result
@@ -311,9 +348,21 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             draft = Synthesis(arguments=plan['arguments'])
         else:
             draft = await ask_scoped(tasks, 'research_synthesis',
+                '按先理解、再分析的顺序写 reading_guide。第一段用连贯白话总结研究问题、已有做法卡在哪里、作者改了什么、'
+                '在什么设置观察到什么结果和适用范围。后续按理解所需写若干有标题的详细讲解，每段承接上段，'
+                '解释一个具体设计选择或实验：先给直觉，再解释机制、为什么这样设计，再用原文公式、实例或带基线的观测帮助读者复述。'
+                '清楚区分作者实验、教学例子和你的推断。方法步骤承担可执行的演算，避免重复讲解段落。'
+                '每段列出它所铺垫的本次论证 claim_ids 和主论文 evidence_ids。覆盖每条论证，'
+                '每条 inference 和 insight.derivation 明确点出前文讲过的具体事实，并解释从它到判断还要用什么前提。'
+                '仅摘要时用第一段说明可确认的内容和细节缺口。窄问题只讲该问题需要的背景。'
                 '若用户明确只问特定数字等窄问题，遵循其范围。对一般阅读或方法问题，针对提出算法的主论文先用 method_steps 帮初学者重建作者的方法。用同一个具体输入按执行顺序走一遍，'
                 '写清每步输入、实际操作、输出流向，朴素做法的瓶颈和为何选此设计。解释关键设计为什么有效：'
                 '区分严格等价、带条件的近似、消融的实验证据和系统提出的假设。给出假设失效的具体输入或可区分的对照实验。'
+                '若有可定位的算法执行结构，给出一张简明教学图 flow_edges（3至9条边），明确数据复用、分支条件和汇合。'
+                'source/target用一致的简短中文节点名，transfer为具体数据或条件；每条边绑定全文证据，'
+                'claim_ids仅标后续论证或洞见确实依赖此边的主张。每个新节点应连接到同一张图。'
+                '对有相关作者原图的讲解填写figure_number，并在段落证据中引用含该图图注的原页。只用确切出现的图号。'
+                '一般方法阅读在总结后展示图；狭窄数值问题、非方法论文、摘要或缺依据时flow_edges留空。'
                 '每步只引用主论文已提供的全文。综述、仅摘要、或无法定位算法细节时返回空列表，不虚构组件。'
                 '面向学生解释符号。洞见尽量从设计步骤的近似或取舍推导。更新主论文的论证并提出有推导依据的insight。只使用所给原文。外部候选不是已确认佐证：'
                 '逐条记录它支持或挑战论证的哪一步及任务/指标/预算/条件可比性；摘要不能验证实验充分性。'
@@ -332,6 +381,19 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
         if any(not set(step.evidence_ids) <= primary_fulltext for step in draft.method_steps):
             result['warnings'].append('方法重建未展示：至少一步缺少本次提供的主论文全文依据')
             draft.method_steps = []
+        argument_claims = {a.claim_id for a in draft.arguments}
+        if draft.flow_edges and (not connected_flow(draft.flow_edges) or not draft.method_steps or not draft.reading_guide or any(
+                edge.source == edge.target or not set(edge.evidence_ids) <= primary_fulltext
+                or not set(edge.claim_ids) <= argument_claims for edge in draft.flow_edges)):
+            draft.flow_edges = []
+            result['warnings'].append('教学图缺少可定位的方法或原文依据，已省略。')
+        primary_ids = {e.id for e in selected if e.paper_id == card.paper_id}
+        if any(not set(p.claim_ids) <= argument_claims or not set(p.evidence_ids) <= primary_ids for p in draft.reading_guide):
+            draft.reading_guide = []
+            result['warnings'].append('讲解引用了未关联的主张或主论文以外的片段，已撤下讲解。')
+        covered = {cid for p in draft.reading_guide for cid in p.claim_ids}
+        if not argument_only and argument_claims - covered:
+            result['warnings'].append('部分论证缺少对应的前文讲解。')
         validate_arguments(draft.arguments, claims, supplied)
         for insight in draft.insights:
             if insight.prediction.casefold() == insight.weakening_observation.casefold():
@@ -359,8 +421,12 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                       and support.argument_index in insight.argument_indices for eid in support.evidence_ids}
             if any(supplied[eid].paper_id in external_ids and eid not in linked for eid in insight.evidence_ids):
                 raise ValueError('见解的外部证据未关联对应缺口的判断')
-        result.update(draft.model_dump(), status='unreviewed')
+        result.update(draft.model_dump(exclude={'flow_edges'}), status='unreviewed')
         review = await ask_scoped(tasks, 'reasoning_verifier',
+            '每条教学图箭头以flow_edge逐条核查，确认起点、终点、传递对象、条件和所绑定主张。'
+            '对figure_number核对其图注和段落是否相关。'
+            '以reading_passage逐段核查讲解、引用和绑定主张：总结可否由原文支持，讲解是否解释了对应论证实际依赖的前提，'
+            '有无混淆教学例子和作者结果。评审argument和insight时检查推导能否接回所关联讲解中的具体事实。'
             '以method_step为target_type逐步核查算法重建：数据流、设计动机是否有原文依据，'
             '推导是否成立，近似是否说明条件，实验能否区分所称机制；对系统推测只评价可检验性。'
             '独立检查每条argument、insight及external_support。为每个对象返回且仅返回一条核查。'
@@ -374,7 +440,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             {'primary_paper_id': card.paper_id, 'synthesis': draft.model_dump(), 'evidence_questions': list(question_map.values()),
              'claim_verifications': [check_summary(v, supplied) for v in card.verifications if v.target_id in claims],
              'evidence': [e.model_dump() for e in selected]}, ReasoningReview, claims, supplied)
-        groups = {'method_step': draft.method_steps, 'argument': draft.arguments, 'insight': draft.insights, 'external_support': draft.external_support}
+        groups = {'flow_edge': draft.flow_edges, 'reading_passage': draft.reading_guide, 'method_step': draft.method_steps, 'argument': draft.arguments, 'insight': draft.insights, 'external_support': draft.external_support}
         expected = {(kind, i) for kind, values in groups.items() for i in range(len(values))}
         seen = set()
         for check in review.checks:
@@ -389,17 +455,18 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                     or not {supplied[eid].paper_id for eid in target.evidence_ids} <= {supplied[eid].paper_id for eid in check.evidence_ids}):
                 check.verdict = 'qualified'
                 check.reason += '；摘要或核查来源覆盖不足，不能视为完整验证'
-            if (check.target_type == 'method_step' and check.verdict == 'supported'
+            if (check.target_type in {'method_step', 'reading_passage', 'flow_edge'} and check.verdict == 'supported'
                     and not set(check.evidence_ids).intersection(target.evidence_ids)):
                 check.verdict = 'qualified'
-                check.reason += '；核查未定位该步骤引用的原文'
+                check.reason += '；核查未定位该段引用的原文'
             dependent_ids = ([target.claim_id] if check.target_type == 'argument' else target.claim_ids if check.target_type == 'insight' else [])
             if check.verdict == 'supported' and (check.target_type == 'argument' or (check.target_type == 'insight' and target.epistemic_status == 'supported_inference')):
                 if any(not any(v.target_id == cid and v.target_version == claims[cid].version and v.verdict == 'verified' for v in card.verifications) for cid in dependent_ids):
                     check.verdict = 'qualified'
                     check.reason += '；依赖的主论文判断尚未完整通过核查'
             seen.add(key)
-        if seen != expected:
+        missing_edges = {key for key in expected - seen if key[0] == 'flow_edge'}
+        if seen | missing_edges != expected:
             raise ValueError('论证核查遗漏对象，保留待审状态')
         # A rejected external link cannot establish a conclusion that relies on that link.
         approved_links = set()
@@ -408,7 +475,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                 support = draft.external_support[check.index]
                 approved_links.update((support.argument_index, support.gap_id, eid) for eid in support.evidence_ids)
         for check in review.checks:
-            if check.verdict != 'supported' or check.target_type in {'external_support', 'method_step'}:
+            if check.verdict != 'supported' or check.target_type in {'external_support', 'method_step', 'reading_passage', 'flow_edge'}:
                 continue
             target = groups[check.target_type][check.index]
             if check.target_type == 'argument':
@@ -420,6 +487,21 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             if any(supplied[eid].paper_id in external_ids and eid not in usable for eid in target.evidence_ids):
                 check.verdict = 'qualified'
                 check.reason += '；依赖的外部佐证尚未通过独立核查'
+        passage_checks = {c.index: c.verdict for c in review.checks if c.target_type == 'reading_passage'}
+        for check in review.checks:
+            if check.target_type not in {'argument', 'insight'} or check.verdict != 'supported' or not draft.reading_guide:
+                continue
+            target = groups[check.target_type][check.index]
+            ids = [target.claim_id] if check.target_type == 'argument' else target.claim_ids
+            for cid in ids:
+                # The overview introduces the topic. Prefer the detailed premises when available.
+                links = [i for i, p in enumerate(draft.reading_guide[1:], 1) if cid in p.claim_ids]
+                if not links and cid in draft.reading_guide[0].claim_ids:
+                    links = [0]
+                if not links or any(passage_checks[i] != 'supported' for i in links):
+                    check.verdict = 'qualified'
+                    check.reason += '；关联讲解的依据仍需限定或补证'
+                    break
         checked = []
         for check in review.checks:
             record = check.model_dump(exclude={'citation_verdict'})
@@ -437,6 +519,33 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                      'inconclusive': '证据不足，保留判断'}[support.relation]
                     if check.verdict == 'supported' else '佐证尚未充分通过核查，保留判断')
             checked.append(record)
+        approved_edges = [(c.index, draft.flow_edges[c.index]) for c in review.checks
+                          if c.target_type == 'flow_edge' and c.verdict == 'supported']
+        approved_edges.sort(key=lambda entry: entry[0])
+        kept = {i for i, _ in approved_edges}
+        omitted = [edge for i, edge in enumerate(draft.flow_edges) if i not in kept]
+        # A disputed input can be left outside the drawing. Never remove an internal branch.
+        inputs_only = all(sum(edge.source == other.source for other in draft.flow_edges) == 1
+                          and all(edge.source != other.target for other in draft.flow_edges) for edge in omitted)
+        if (draft.reading_guide and not missing_edges and inputs_only
+                and connected_flow([edge for _, edge in approved_edges])):
+            result['flow_edges'] = [dict(edge.model_dump(), review_index=i) for i, edge in approved_edges]
+            if omitted:
+                result['flow_scope'] = 'partial'
+                result['warnings'].append('教学图从已核实的输入开始，省略待核实的输入路径：' +
+                                          '、'.join(e.source + ' → ' + e.target for e in omitted))
+            for target in [*result['arguments'], *result['insights']]:
+                ids = set(target.get('claim_ids', [target.get('claim_id')]))
+                cited = set(target['evidence_ids'])
+                matches = []
+                for index, (_, edge) in enumerate(approved_edges):
+                    shared = cited.intersection(edge.evidence_ids)
+                    if ids.intersection(edge.claim_ids) and shared:
+                        matches.append((len(shared) / len(set(edge.evidence_ids)), len(shared), index))
+                matches.sort(key=lambda item: (-item[0], -item[1], item[2]))
+                target['flow_edge_indices'] = [index for _, _, index in matches[:2]]
+        elif draft.flow_edges:
+            result['warnings'].append('教学图有箭头未通过核查，保留文字讲解。')
         result.update(checks=checked, status='reviewed')
     except (ValueError, RuntimeError, TimeoutError) as exc:
         result['warnings'].append(str(exc) or type(exc).__name__)
@@ -460,12 +569,44 @@ def render_citation(check):
             f"决定性原文（{location}，{citation['evidence_id']}）：{citation['excerpt']}"]
 
 
+def render_flow(edges, partial=False):
+    # Only generated node identifiers and arrows are syntax. User/model text stays literal.
+    def label(text):
+        return ''.join(c if c.isalnum() or c == ' ' else f'#{ord(c)};' for c in text)
+    names = list(dict.fromkeys(n for edge in edges for n in (edge['source'], edge['target'])))
+    graph = ['```mermaid', 'flowchart TD']
+    graph.extend(f'  N{i}["{label(name)}"]' for i, name in enumerate(names))
+    for edge in edges:
+        graph.append(f'  N{names.index(edge["source"])} -->|"{label(edge["transfer"])}"| N{names.index(edge["target"])}')
+    return ['### ' + ('局部数据流' if partial else '算法数据流') + ' · 系统教学重绘', '\n'.join([*graph, '```']),
+            *[f"{i}. {e['source']} → {e['target']} · {e['transfer']}（依据：{'、'.join(e['evidence_ids'])}）"
+              for i, e in enumerate(edges, 1)]]
+
+
 def render_reasoning(results):
-    lines = ['# 核心论证与研究见解', '系统推论与研究建议不等于作者结论；核查通过也不表示独立复现。']
+    lines = ['# 论文讲解、核心论证与研究见解', '系统推论与研究建议不等于作者结论；核查通过也不表示独立复现。']
     for result in results:
         lines.append('## 主论文：' + result['paper_id'])
         lines.extend('> ' + w for w in result['warnings'])
         reviews = {(c['target_type'], c['index']): c for c in result['checks']}
+        guide = result.get('reading_guide', [])
+        passage_sources = []
+        for i, passage in enumerate(guide):
+            check = reviews.get(('reading_passage', i), {'verdict': 'unreviewed', 'reason': '尚未完成独立核查'})
+            heading = '论文总结' if i == 0 else f'讲解 {i}'
+            lines.extend([f"### {heading} · {passage['title']}", passage['explanation']])
+            if check['verdict'] != 'supported':
+                lines.append(f"> {check['verdict']} · {check['reason']}")
+            for figure in result.get('reading_figures', []):
+                if figure['passage_index'] == i:
+                    caption = f"作者图 {figure['number']} · 第 {figure['page']} 页"
+                    lines.append(caption + ' · ' + figure['caption_excerpt'])
+                    if figure.get('url'):
+                        lines.append(f"![{caption}]({figure['url']})")
+            if i == 0 and result.get('flow_edges'):
+                lines.extend(render_flow(result['flow_edges'], result.get('flow_scope') == 'partial'))
+            passage_sources.extend([f"**{heading} · {passage['title']}**", '原文：' + '、'.join(passage['evidence_ids']),
+                                    f"讲解核查（{check['verdict']}）：{check['reason']}"])
         if result.get('method_steps'):
             lines.append('## 算法如何工作')
         for i, step in enumerate(result.get('method_steps', [])):
@@ -474,19 +615,19 @@ def render_reasoning(results):
                           '设计取舍：' + step['design_reason'], METHOD_BASIS[step['basis']] + '：' + step['justification'],
                           '失效条件或检验：' + step['failure_or_test'], '原文：' + '、'.join(step['evidence_ids']),
                           f"步骤核查（{check['verdict']}）：{check['reason']}"])
-        for gap in result.get('evidence_questions', []):
-            if gap['local_review']['decision'] == 'external_needed' and not gap['candidate_ids']:
-                lines.append('该缺口尚无可用外部候选，保留当前判断。')
-            lines.extend(['### 待检验问题：' + gap['question'], '假设：' + gap['hypothesis'],
-                          '预期观察：' + gap['prediction'], '会削弱判断的观察：' + gap['weakening_observation'],
-                          '比较条件：' + gap['comparable_conditions'], '外查停止条件：' + gap['stopping_rule'],
-                          '本文核查与外查决定：' + gap['local_review']['reason'],
-                          '本文依据：' + ('、'.join(gap['local_review']['evidence_ids']) or '无定向核查引文')])
         for kind, values in [('argument', result['arguments']), ('external_support', result['external_support']), ('insight', result['insights'])]:
             for i, value in enumerate(values):
                 check = reviews.get((kind, i), {'verdict': 'unreviewed', 'reason': '尚未完成独立核查'})
                 labels = {'thesis':'主张','inference':'推理桥梁','conditions':'成立条件','alternative_explanation':'替代解释','falsification':'反驳条件','conclusion':'当前结论','statement':'见解','derivation':'推导','uncertainty':'不确定性','prediction':'预期观察','weakening_observation':'会削弱判断的观察','distinguishing_test':'验证实验','comparability':'可比条件','contribution':'证据贡献','relation':'佐证关系','epistemic_status':'认识状态'}
                 lines.append(f"### {dict(argument='论证', external_support='外部佐证', insight='Insight')[kind]} {i+1}（{check['verdict']}）")
+                if kind in {'argument', 'insight'}:
+                    ids = [value['claim_id']] if kind == 'argument' else value['claim_ids']
+                    for index in value.get('flow_edge_indices', []):
+                        edge = result['flow_edges'][index]
+                        lines.append(f"对应图中路径 {index + 1} · {edge['source']} → {edge['target']}")
+                    titles = [p['title'] for p in guide if set(ids).intersection(p['claim_ids'])]
+                    if titles:
+                        lines.append('承接前文：' + '、'.join(titles))
                 lines.extend(f'{label}：{value[key]}' for key, label in labels.items() if key in value)
                 if kind == 'insight':
                     for gap in result.get('evidence_questions', []):
@@ -501,8 +642,18 @@ def render_reasoning(results):
                     lines.extend(render_citation(check))
                 lines.append('证据：' + '、'.join(value['evidence_ids']))
                 lines.append('核查：' + check['reason'])
+        for gap in result.get('evidence_questions', []):
+            if gap['local_review']['decision'] == 'external_needed' and not gap['candidate_ids']:
+                lines.append('该缺口尚无可用外部候选，保留当前判断。')
+            lines.extend(['### 待检验问题：' + gap['question'], '假设：' + gap['hypothesis'],
+                          '预期观察：' + gap['prediction'], '会削弱判断的观察：' + gap['weakening_observation'],
+                          '比较条件：' + gap['comparable_conditions'], '外查停止条件：' + gap['stopping_rule'],
+                          '本文核查与外查决定：' + gap['local_review']['reason'],
+                          '本文依据：' + ('、'.join(gap['local_review']['evidence_ids']) or '无定向核查引文')])
         if not result['insights']:
             lines.append('未形成可交付的 insight；不强行补齐。')
+        if passage_sources:
+            lines.extend(['### 讲解原文与核查记录', *passage_sources])
         if result['omitted_evidence_ids']:
             lines.append(f"本阶段未覆盖 {len(result['omitted_evidence_ids'])} 个证据片段，完整记录见结构化产物。")
     return '\n\n'.join(lines)

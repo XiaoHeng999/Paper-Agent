@@ -50,7 +50,9 @@ class ReasoningModel(FakeModel):
             external = [e for e in p['evidence'] if e['paper_id'] in p['external_candidate_ids']]
             support = [{'gap_id':p['evidence_questions'][0]['gap_id'], 'argument_index':0, 'evidence_ids':[external[0]['id']], 'relation':'supports',
                 'comparability':'same task, budget unknown', 'contribution':'independent mechanism observation'}] if external else []
-            value = {'arguments':args, 'external_support':support, 'insights':[{
+            guide = [{'title':'研究问题', 'explanation':'先比较相同预算下的误差。',
+                      'claim_ids':[args[0]['claim_id']], 'evidence_ids': args[0]['evidence_ids']}]
+            value = {'reading_guide':guide, 'arguments':args, 'external_support':support, 'insights':[{
                 'claim_ids':[args[0]['claim_id']], 'argument_indices':[0], 'kind':'boundary', 'epistemic_status':'hypothesis',
                 'statement':'共享代理信号可能产生共同失效条件', 'derivation':'路由和补偿复用同一信号，因此可能共同受噪声影响',
                 'evidence_ids': ['invented'] if self.bad_citation else args[0]['evidence_ids'],
@@ -58,7 +60,7 @@ class ReasoningModel(FakeModel):
             if self.foreign_argument:
                 value['insights'][0]['argument_indices'] = [99]
         else:
-            groups = {'argument':'arguments','insight':'insights','external_support':'external_support'}
+            groups = {'argument':'arguments','insight':'insights','external_support':'external_support', 'reading_passage':'reading_guide'}
             value = {'checks':[{'target_type':kind,'index':i,'verdict':'supported','reason':'raw evidence matches derivation',
                 'evidence_ids':x['evidence_ids']} for kind, field in groups.items() for i,x in enumerate(p['synthesis'][field])]}
             if self.incomplete_review:
@@ -82,19 +84,35 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                         'design_reason':'减少排序开销', 'basis':'approximation',
                         'justification':'用块均值近似，依赖块内差异较小', 'failure_or_test':'固定掩码增大块内差异',
                         'evidence_ids':[payload['evidence'][0]['id']]}]
+                    value['flow_edges'] = [
+                        {'source': a, 'target': b, 'transfer': label, 'claim_ids':[value['arguments'][0]['claim_id']],
+                         'evidence_ids': [payload['evidence'][0]['id']]}
+                        for a, b, label in [('查询', '路由', '块均值'), ('路由', '精算', '入选索引'), ('精算', '输出', '加权值')]]
+                    value['reading_guide'][0]['figure_number'] = 4
                 if payload['role'] == 'reasoning_verifier' and payload['synthesis'].get('method_steps'):
+                    for i, edge in enumerate(payload['synthesis']['flow_edges']):
+                        value['checks'].append({'target_type':'flow_edge', 'index':i,
+                                                'verdict':'qualified' if i == disputed else 'supported',
+                                                'reason':'检查路由流向', 'evidence_ids':edge['evidence_ids']})
                     value['checks'].append({'target_type':'method_step','index':0,'verdict':'qualified',
                                             'reason':'需要控制块内差异', 'evidence_ids':payload['synthesis']['method_steps'][0]['evidence_ids']})
                 response.content = json.dumps(value)
                 return response
 
-        for level in ('full_text', 'abstract'):
-            source = EvidenceSpan(id='s', paper_id='p1', version='1', source_level=level, text='使用池化键路由')
-            with self.subTest(level=level), patch('src.research.workflow.load_evidence', return_value=[source]):
+        for level, disputed in [('full_text', None), ('full_text', 0), ('full_text', 1), ('abstract', None)]:
+            source = EvidenceSpan(id='s', paper_id='p1', version='1', source_level=level, page_start=5, page_end=5,
+                                  text='Figure 4 | 使用池化键路由')
+            with self.subTest(level=level, disputed=disputed), patch('src.research.workflow.load_evidence', return_value=[source]):
                 output = await run_research_node()(self.task(MethodModel()))
                 result = output['research_report']['reasoning'][0]
                 self.assertEqual(result['status'], 'reviewed')
                 if level == 'full_text':
+                    if disputed == 0:
+                        self.assertEqual(result['flow_scope'], 'partial')
+                        self.assertEqual([e['review_index'] for e in result['flow_edges']], [1, 2])
+                    self.assertEqual(result['reading_figures'][0]['page'], 5)
+                    self.assertEqual('对应图中路径' in output['research_markdown'], disputed != 1)
+                    self.assertEqual('```mermaid' in output['research_markdown'], disputed != 1)
                     self.assertEqual(result['method_steps'][0]['evidence_ids'], ['s'])
                     self.assertEqual(next(c['verdict'] for c in result['checks'] if c['target_type']=='method_step'), 'qualified')
                     self.assertIn('近似及其条件', output['research_markdown'])
@@ -103,6 +121,56 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(result['method_steps'])
                     self.assertNotIn('算法如何工作', output['research_markdown'])
                     self.assertTrue(result['arguments'])
+
+    async def test_reading_guide_precedes_analysis_and_scopes_its_conclusions(self):
+        class GuideModel(ReasoningModel):
+            async def chat(self, messages, **kwargs):
+                response = await super().chat(messages, **kwargs)
+                payload = json.loads(messages[-1]['content'])
+                value = json.loads(response.content)
+                if payload['role'] == 'research_synthesis':
+                    arg = value['arguments'][0]
+                    value['reading_guide'] = [
+                        {'title': title, 'explanation': explanation, 'claim_ids': [arg['claim_id']],
+                         'evidence_ids': arg['evidence_ids']}
+                        for title, explanation in [('预算与误差', '本文在固定预算下观察误差。'),
+                                                   ('同预算对照', '相同预算才能解释两组误差之差。')]]
+                elif payload['role'] == 'reasoning_verifier':
+                    for check in value['checks']:
+                        if check['target_type'] == 'reading_passage':
+                            check.update(verdict='qualified', reason='预算匹配仍待核查')
+                response.content = json.dumps(value)
+                return response
+
+        source = EvidenceSpan(id='s', paper_id='p1', version='1', source_level='full_text', text='固定预算下比较误差')
+        with patch('src.research.workflow.load_evidence', return_value=[source]):
+            output = await run_research_node()(self.task(GuideModel()))
+        result = output['research_report']['reasoning'][0]
+        self.assertEqual(result['status'], 'reviewed')
+        report = output['research_markdown']
+        self.assertLess(report.index('论文总结 · 预算与误差'), report.index('讲解 1 · 同预算对照'))
+        self.assertLess(report.index('讲解 1 · 同预算对照'), report.index('推理桥梁'))
+        self.assertEqual(report.count('承接前文：预算与误差、同预算对照'), 2)
+        insight = next(c for c in result['checks'] if c['target_type'] == 'insight')
+        self.assertEqual(insight['verdict'], 'qualified')
+        self.assertIn('关联讲解', insight['reason'])
+
+    async def test_reading_guide_with_an_invented_source_is_withheld(self):
+        class InvalidGuide(ReasoningModel):
+            async def chat(self, messages, **kwargs):
+                response = await super().chat(messages, **kwargs)
+                if json.loads(messages[-1]['content'])['role'] == 'research_synthesis':
+                    value = json.loads(response.content)
+                    value['reading_guide'][0]['evidence_ids'] = ['unknown-source']
+                    response.content = json.dumps(value)
+                return response
+
+        output = await run_research_node()(self.task(InvalidGuide()))
+        result = output['research_report']['reasoning'][0]
+        self.assertFalse(result['reading_guide'])
+        self.assertTrue(result['arguments'])
+        self.assertIn('部分论证缺少对应的前文讲解。', result['warnings'])
+        self.assertNotIn('论文总结 ·', output['research_markdown'])
 
     async def test_single_paper_reasoning_and_insights_are_delivered_without_search(self):
         model = ReasoningModel()

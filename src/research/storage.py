@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -63,9 +64,9 @@ class ResearchStore:
     async def save(self, kind: str, payload, *, cache_key: str = "", name: str = "", metadata: dict | None = None):
         if not self.repo or not self.session:
             return
-        content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
+        content = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False, indent=2)
         name = name or f"{kind}.json"
-        identity = version_of({"kind": kind, "content": content, "turn": self.turn})
+        identity = version_of({"kind": kind, "content": hashlib.sha256(content).hexdigest() if isinstance(content, bytes) else content, "turn": self.turn})
         write = asyncio.create_task(asyncio.to_thread(self.repo.write_artifact, self.session, kind, name, content,
             relative_path=f"artifacts/research/{identity}/{name}",
             metadata={**(metadata or {}), "turn_id": self.turn, "cache_key": cache_key, "schema_version": 1}))
@@ -78,6 +79,7 @@ class ResearchStore:
         self.artifacts.append(record)
         if self.reporter:
             self.reporter.artifact(record)
+        return record
 
     async def load(self, cache_key: str):
         if not self.repo or not self.session:

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import MethodFlow from './MethodFlow.vue';
 import type { Claim, Evidence, Relation, ResearchReport, ResearchReasoning } from "../../types/research";
 import type { SessionRunAccepted } from "../../types/sessions";
 const props = defineProps<{ sessionKey: string; artifactId: string; busy: boolean }>();
@@ -37,6 +38,14 @@ function reasoningCheck(result: ResearchReasoning, kind: string, index: number) 
   const check = result.checks.find(c => c.target_type === kind && c.index === index);
   return check ? `${label(check.verdict)}：${check.reason}` : '尚未完成独立核查';
 }
+function relatedEdges(result: ResearchReasoning, indices: number[] = []) {
+  return (result.flow_edges ?? []).map((e, index) => ({...e, index}))
+    .filter(e => indices.includes(e.index));
+}
+function relatedPassages(result: ResearchReasoning, claims: string[]) {
+  return (result.reading_guide ?? []).map((p, index) => ({ ...p, index }))
+    .filter(p => p.claim_ids.some(id => claims.includes(id)));
+}
 function showEvidence(ids: string[]) { evidence.value = (report.value?.evidence ?? []).filter(e => ids.includes(e.id)); }
 function selectRelation(edge: Relation) { selectedRelation.value = edge; showEvidence(edge.evidence_ids); }
 function position(id: string) {
@@ -71,9 +80,24 @@ async function revise() {
     <template v-if="report">
       <p>评价仅针对已读取来源；unknown 表示证据或核查不足。人工修订将生成新报告，原记录保留。</p>
       <section v-for="result in report.reasoning ?? []" :key="result.paper_id" class="reasoning">
-        <h4>核心论证与 Insight · {{ result.paper_id }}</h4>
+        <h4>论文讲解与分析 · {{ result.paper_id }}</h4>
         <p>系统推论和假设不等于作者结论；核查支持不表示已经独立复现。</p>
         <p v-for="warning in result.warnings" :key="warning">{{ warning }}</p>
+        <section v-for="(passage, index) in result.reading_guide" :id="result.paper_id + '-reading-' + index" :key="index">
+          <h4>{{ index === 0 ? '论文总结' : '讲解 ' + index }} · {{ passage.title }}</h4>
+          <p style="white-space: pre-line">{{ passage.explanation }}</p>
+          <details><summary>讲解依据与核查</summary>
+            <p>{{ reasoningCheck(result, 'reading_passage', index) }}</p>
+            <button type="button" @click="showEvidence(passage.evidence_ids)">查看原文</button>
+          </details>
+          <figure v-for="fig in result.reading_figures?.filter(f => f.passage_index === index)" :key="fig.number">
+            <figcaption>作者图 {{ fig.number }} · 第 {{ fig.page }} 页 · {{ fig.caption_excerpt }}</figcaption>
+            <a v-if="fig.url" :href="fig.url" target="_blank" rel="noopener">
+              <img :src="fig.url" :alt="'作者图 ' + fig.number + ' 所在原页，点击放大'" loading="lazy" style="max-width:100%;max-height:28rem" />
+            </a>
+          </figure>
+          <MethodFlow v-if="index === 0 && result.flow_edges?.length" :edges="result.flow_edges" :partial="result.flow_scope === 'partial'" :paper="result.paper_id" @evidence="showEvidence"/>
+        </section>
         <section v-if="result.method_steps?.length">
           <h4>算法如何工作</h4>
           <ol><li v-for="(step, index) in result.method_steps" :key="index">
@@ -88,6 +112,12 @@ async function revise() {
         </section>
         <article v-for="(argument, index) in result.arguments" :key="argument.claim_id">
           <h5>{{ argument.thesis }}</h5>
+          <p v-for="e in relatedEdges(result, argument.flow_edge_indices)" :key="e.index">
+            对应图中路径 · <a :href="'#' + result.paper_id + '-flow-' + e.index">{{ e.source }} → {{ e.target }}</a>
+          </p>
+          <p v-for="p in relatedPassages(result, [argument.claim_id])" :key="p.index">
+            承接前文 · <a :href="'#' + result.paper_id + '-reading-' + p.index">{{ p.title }}</a>
+          </p>
           <p>推理：{{ argument.inference }}</p><p>条件：{{ argument.conditions }}</p>
           <p>替代解释：{{ argument.alternative_explanation }}</p><p>证伪条件：{{ argument.falsification }}</p>
           <p>结论：{{ argument.conclusion }}</p><p>{{ reasoningCheck(result, 'argument', index) }}</p>
@@ -122,6 +152,12 @@ async function revise() {
         </article>
         <article v-for="(insight, index) in result.insights" :key="`insight-${index}`">
           <h5>{{ label(insight.epistemic_status) }}：{{ insight.statement }}</h5>
+          <p v-for="e in relatedEdges(result, insight.flow_edge_indices)" :key="e.index">
+            对应图中路径 · <a :href="'#' + result.paper_id + '-flow-' + e.index">{{ e.source }} → {{ e.target }}</a>
+          </p>
+          <p v-for="p in relatedPassages(result, insight.claim_ids ?? [])" :key="p.index">
+            承接前文 · <a :href="'#' + result.paper_id + '-reading-' + p.index">{{ p.title }}</a>
+          </p>
           <p v-for="q in result.evidence_questions?.filter(q => insight.gap_ids?.includes(q.gap_id))" :key="q.gap_id">对应证据缺口：{{ q.question }}</p>
           <p>推导：{{ insight.derivation }}</p><p>不确定性：{{ insight.uncertainty }}</p>
           <p v-if="insight.prediction">预期观察：{{ insight.prediction }}</p><p v-if="insight.weakening_observation">会削弱判断的观察：{{ insight.weakening_observation }}</p>
