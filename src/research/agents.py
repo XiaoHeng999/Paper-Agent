@@ -30,6 +30,8 @@ class ModelTasks:
         self.reading_gaps = {}
         self.visual_audit = []
         self.calls = 0
+        self.role_stats = {}
+        self.recovery_trace = []
         self.deadline = time.monotonic() + options.timeout_seconds
         self.semaphore = asyncio.Semaphore(2)
         self.usage = {"input_tokens": 0, "output_tokens": 0}
@@ -59,14 +61,20 @@ class ModelTasks:
             if images:
                 messages[-1]["content"] = [{"type": "text", "text": messages[-1]["content"]}] + [
                     {"type": "image_url", "image_url": {"url": image}} for image in images]
-            async with asyncio.timeout(remaining):
-                chat = getattr(provider, "chat", None)
-                if chat:
-                    response = chat(messages, temperature=0)
-                    if inspect.isawaitable(response):
-                        response = await response
-                else:
-                    response = await asyncio.to_thread(provider.chat_with_retry, messages, temperature=0)
+            stat = self.role_stats.setdefault(role, {'calls': 0, 'seconds': 0.0})
+            stat['calls'] += 1
+            started = time.monotonic()
+            try:
+                async with asyncio.timeout(remaining):
+                    chat = getattr(provider, "chat", None)
+                    if chat:
+                        response = chat(messages, temperature=0)
+                        if inspect.isawaitable(response):
+                            response = await response
+                    else:
+                        response = await asyncio.to_thread(provider.chat_with_retry, messages, temperature=0)
+            finally:
+                stat['seconds'] += time.monotonic() - started
             usage = normalize_token_usage(getattr(response, "usage", None))
             for key in self.usage:
                 self.usage[key] += usage[key]

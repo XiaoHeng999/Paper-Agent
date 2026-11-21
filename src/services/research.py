@@ -15,6 +15,22 @@ def latest_report(repo, session_key):
     return {"artifact_id": None, "report": None}
 
 
+def resume_review_request(repo, session_key, body):
+    latest = latest_report(repo, session_key)
+    report = latest['report']
+    if not report or latest['artifact_id'] != body.get('artifact_id'):
+        raise ValueError('报告版本已变化，请刷新后再复审')
+    if not any(r.get('pending_review') for r in report.get('reasoning', [])):
+        raise ValueError('该报告没有待恢复的核查')
+    checkpoint_id = report.get('checkpoint_id')
+    path = repo.read_artifact_path(session_key, checkpoint_id) if checkpoint_id else None
+    if not path:
+        raise ValueError('缺少该报告的复审现场')
+    checkpoint = json.loads(path.read_text(encoding='utf-8'))
+    checkpoint['resume_final_review'] = True
+    return {'content': '继续核查已保存的研究草稿', 'read_resume_checkpoint': checkpoint}
+
+
 def revision_request(repo, session_key, body):
     latest = latest_report(repo, session_key)
     if not latest["report"] or body.get("artifact_id") != latest["artifact_id"]:

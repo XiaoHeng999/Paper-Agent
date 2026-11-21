@@ -555,10 +555,10 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         evidence=[EvidenceSpan.model_validate(e) for e in r['evidence']]
         tasks=ModelTasks(ReasoningModel(),ResearchOptions())
         kwargs={'previous':r['reasoning'][0], 'source_manifests':r['source_manifests']}
-        reused=await synthesize(tasks,'Q',card,r['argument_plans'][0],evidence,set(),r['execution_policy'],**kwargs)
+        reused=await synthesize(tasks,'方法有效吗',card,r['argument_plans'][0],evidence,set(),r['execution_policy'],**kwargs)
         self.assertTrue(reused['reused']);self.assertEqual(tasks.calls,0)
         evidence.append(EvidenceSpan(id='new',paper_id=card.paper_id,version='new',text='new result',source_level='full_text'))
-        changed=await synthesize(tasks,'Q',card,r['argument_plans'][0],evidence,set(),r['execution_policy'],**kwargs)
+        changed=await synthesize(tasks,'方法有效吗',card,r['argument_plans'][0],evidence,set(),r['execution_policy'],**kwargs)
         self.assertNotIn('reused',changed);self.assertEqual(tasks.calls,2)
         self.assertNotEqual(changed['version'],reused['version'])
 

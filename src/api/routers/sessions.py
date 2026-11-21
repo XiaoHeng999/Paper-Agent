@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
 from src.services.session_runs import SessionRunService, encode_sse
-from src.services.research import latest_report, revision_request
+from src.services.research import latest_report, resume_review_request, revision_request
 from src.services.sessions import (
     MessageHandler,
     create_session,
@@ -92,6 +92,11 @@ def create_sessions_router(
     @router.get("/{session_key}/research")
     async def get_research(session_key: str) -> JsonObject:
         return await asyncio.to_thread(latest_report, repo, session_key)
+
+    @router.post("/{session_key}/research/resume-review", status_code=202)
+    async def resume_review(session_key: str, request: Request) -> JsonObject:
+        body = await asyncio.to_thread(resume_review_request, repo, session_key, await _json_body(request))
+        return await resolved_run_service.start_run(session_key, body)
 
     @router.post("/{session_key}/research/revisions", status_code=202)
     async def revise_research(session_key: str, request: Request) -> JsonObject:

@@ -2,6 +2,8 @@
 
  > 状态：新研究流程已接入，旧 Analyse → Outline → Writing 流水线及兼容路由已删除。第 3～12 节包含目标设计，第 13 节说明已实现范围与限制。
 
+关于六类工程边界、完整草稿复审及其验收实验，见[多 Agent 边界与恢复方案](multi-agent-boundaries-and-recovery.md)。
+
 ## 1. 拆分依据
 
 独立角色来自可并行工作、上下文隔离或校验责任差异，而不是每个步骤都包装一个 Agent。逐篇 Reader 可并行，Verifier 独立核查，跨篇 Analyst 按需调用；下载、切块、持久化和报告拼接是普通工程步骤。

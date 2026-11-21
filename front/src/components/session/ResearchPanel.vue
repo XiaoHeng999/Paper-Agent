@@ -4,7 +4,7 @@ import MethodFlow from './MethodFlow.vue';
 import type { Claim, Evidence, Relation, ResearchReport, ResearchReasoning } from "../../types/research";
 import type { SessionRunAccepted } from "../../types/sessions";
 const props = defineProps<{ sessionKey: string; artifactId: string; busy: boolean }>();
-const emit = defineEmits<{ revision: [value: SessionRunAccepted] }>();
+const emit = defineEmits<{ revision: [value: SessionRunAccepted, message: string] }>();
 const report = ref<ResearchReport | null>(null);
 const artifact = ref("");
 const error = ref("");
@@ -55,19 +55,23 @@ function position(id: string) {
 }
 function edit(claim: Claim) { editing.value = claim; statement.value = claim.statement; conditions.value = claim.conditions; reason.value = ""; }
 async function revise() {
-  if (!editing.value || !reason.value.trim() || submitting.value || props.busy) return;
+  if (!editing.value || !reason.value.trim()) return;
+  await startResearchRun('revisions', {claim_id: editing.value.id, target_version: editing.value.version,
+    reason: reason.value, changes: {statement: statement.value, conditions: conditions.value}});
+}
+async function startResearchRun(action: 'resume-review' | 'revisions', fields = {}) {
+  if (submitting.value || props.busy) return;
   const session = props.sessionKey;
   const current = generation;
   submitting.value = true; error.value = "";
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(props.sessionKey)}/research/revisions`, {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(props.sessionKey)}/research/${action}`, {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({artifact_id: artifact.value, claim_id: editing.value.id, target_version: editing.value.version,
-        reason: reason.value, changes: {statement: statement.value, conditions: conditions.value}}),
+      body: JSON.stringify({artifact_id: artifact.value, ...fields}),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message ?? data.detail ?? "修订失败");
-    if (current === generation && session === props.sessionKey) { editing.value = null; emit("revision", data); }
+    if (!response.ok) throw new Error(data.error?.message ?? data.detail ?? "启动研究任务失败");
+    if (current === generation && session === props.sessionKey) { editing.value = null; emit("revision", data, action === "resume-review" ? "继续核查已保存的草稿" : "修订判断并重新核查"); }
   } catch (e) { if (current === generation) error.value = String(e); }
   finally { submitting.value = false; }
 }
@@ -79,6 +83,8 @@ async function revise() {
     <p v-if="loading">正在读取研究对象…</p><p v-if="error" role="alert">{{ error }}</p>
     <template v-if="report">
       <p>评价仅针对已读取来源；unknown 表示证据或核查不足。人工修订将生成新报告，原记录保留。</p>
+      <button v-if="report.checkpoint_id && report.reasoning?.some(r => r.pending_review)" type="button"
+        :disabled="submitting || busy" @click="startResearchRun('resume-review')">继续核查已保存的草稿</button>
       <section v-for="result in report.reasoning ?? []" :key="result.paper_id" class="reasoning">
         <h4>论文讲解与分析 · {{ result.paper_id }}</h4>
         <p>系统推论和假设不等于作者结论；核查支持不表示已经独立复现。</p>

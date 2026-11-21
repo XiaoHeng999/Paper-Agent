@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -299,6 +300,31 @@ class SessionStoreBackend:
             "created_at": created_at,
             "metadata": payload,
         }
+
+    def write_keyed_artifact(self, session_id, artifact_type, name, content, relative_path, metadata, created_at):
+        """Commit one accepted research-stage output per session, stage and dependency key."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("""
+                SELECT * FROM session_artifact WHERE session_id = ? AND artifact_type = ?
+                AND json_extract(metadata, '$.cache_key') = ? ORDER BY rowid DESC
+            """, (session_id, artifact_type, metadata['cache_key']))
+            for row in rows:
+                existing = self._row_to_artifact(row)
+                path = Path(existing['path']).resolve()
+                if path.is_relative_to((self.sessions_dir / session_id).resolve()) and path.is_file():
+                    with path.open('rb') as stream:
+                        if hashlib.file_digest(stream, 'sha256').hexdigest() == existing['metadata'].get('content_hash'):
+                            return existing
+            path = self.write_artifact_file(session_id, relative_path, content)
+            identity = uuid.uuid4().hex
+            connection.execute("""
+                INSERT INTO session_artifact (id, session_id, artifact_type, name, path, size, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (identity, session_id, artifact_type, name, str(path), path.stat().st_size,
+                  created_at, self._dump_json(metadata)))
+            return self._row_to_artifact(connection.execute(
+                "SELECT * FROM session_artifact WHERE id = ?", (identity,)).fetchone())
 
     def list_artifacts(self, session_id: str) -> list[JsonObject]:
         """读取会话关联的全部产物记录。"""
@@ -636,6 +662,10 @@ class SQLiteSessionRepository(SessionRepository):
 
         self.get(key)
         resolved_created_at = created_at or utc_now()
+        if artifact_type in {'reasoning_draft', 'reasoning_review', 'reasoning_publication'} and metadata and metadata.get('cache_key'):
+            data = content.encode(encoding) if isinstance(content, str) else content
+            return self.backend.write_keyed_artifact(key, artifact_type, name, data, relative_path,
+                {**metadata, 'content_hash': hashlib.sha256(data).hexdigest()}, resolved_created_at)
         target_path = self.backend.write_artifact_file(
             session_id=key,
             relative_path=relative_path,

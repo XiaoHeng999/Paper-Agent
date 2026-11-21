@@ -81,17 +81,30 @@ class ResearchStore:
             self.reporter.artifact(record)
         return record
 
-    async def load(self, cache_key: str):
+    async def accept(self, kind, payload, key):
+        record = await self.save(kind, payload, cache_key=key)
+        if record is None:
+            return payload
+        path = await asyncio.to_thread(self.repo.read_artifact_path, self.session, record['id'])
+        if path is None:
+            raise OSError('已登记的研究产物不可读取')
+        return json.loads(await asyncio.to_thread(path.read_text, encoding='utf-8'))
+
+    async def load(self, cache_key: str, kind: str = "research_paper"):
         if not self.repo or not self.session:
             return None
         record = await asyncio.to_thread(self.repo.get, self.session)
         for artifact in reversed(record.artifacts):
-            if artifact.get("artifact_type") != "research_paper" or artifact.get("metadata", {}).get("cache_key") != cache_key:
+            if artifact.get("artifact_type") != kind or artifact.get("metadata", {}).get("cache_key") != cache_key:
                 continue
             path = await asyncio.to_thread(self.repo.read_artifact_path, self.session, artifact["id"])
             if path:
                 try:
-                    return json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+                    data = await asyncio.to_thread(path.read_bytes)
+                    expected_hash = artifact.get('metadata', {}).get('content_hash')
+                    if expected_hash and hashlib.sha256(data).hexdigest() != expected_hash:
+                        continue
+                    return json.loads(data)
                 except (ValueError, OSError):
                     continue
         return None

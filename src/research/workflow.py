@@ -8,7 +8,7 @@ from src.agents.readAgent import load_read_agent_llm
 from .agents import ModelTasks, compare, read_claims, verify, write_report
 from .context import ScopedEvidence
 from .assessment import assess_card, comparison_views
-from .models import Claim, ClaimDraft, PaperCard, ResearchOptions, version_of
+from .models import Claim, ClaimDraft, PaperCard, PreparedPaper, ResearchOptions, version_of
 from .retrieval import EvidenceIndex
 from .storage import ResearchStore, load_evidence
 from .supplement import supplement_sources
@@ -95,8 +95,11 @@ def run_research_node():
             parent_path = await asyncio.to_thread(store.repo.read_artifact_path, store.session, revision["parent_artifact_id"])
             if parent_path:
                 parent_report = json.loads(await asyncio.to_thread(parent_path.read_text, encoding="utf-8"))
+        resume_key = (state.get("read_resume_checkpoint") or {}).get("analysis_inputs_key")
+        snapshot = (await store.load(resume_key, 'analysis_inputs') if isinstance(resume_key, str) else None) or {}
         checkpoint = {
-            "revision": revision,
+            "analysis_inputs_key": resume_key, "revision": revision,
+            "resume_final_review": (state.get("read_resume_checkpoint") or {}).get("resume_final_review") is True,
             "phase": "research", "request": {"topic": request.topic, "constraints": request.constraints, "language": request.language},
             "search_results": [p.to_dict() for p in state.get("search_results", [])],
             "external_search": external_search,
@@ -109,9 +112,13 @@ def run_research_node():
         retrieval = state.get("research_evidence_index")
         all_evidence = []
         inputs = []
-        input_warnings = {}
+        paper_scopes = {}
         if parent_report and parent_report.get("visual_model") == getattr(llm, "signature", None):
             tasks.previous_visual_evidence = parent_report.get("evidence", [])
+        if snapshot and version_of(snapshot) != resume_key:
+            snapshot = {}
+        if snapshot.get('visual_model') == getattr(llm, 'signature', None) and snapshot:
+            tasks.previous_visual_evidence = snapshot['transcriptions']
         tasks.question = request.topic
         tasks.remaining_visual_papers = sum(str(i.get("full_text", {}).get("source_path", "")).lower().endswith(".pdf") for i in items)
         visual_audits = []
@@ -124,11 +131,12 @@ def run_research_node():
                 return
             seen.add(paper_id)
             before_load = await asyncio.to_thread(document_version, item)
+            load_error = ''
             try:
                 evidence = await asyncio.to_thread(load_evidence, item)
             except (OSError, ValueError) as exc:
                 evidence = []
-                input_warnings[paper_id] = f"原文准备失败，未生成判断：{exc}"
+                load_error = f"原文准备失败，未生成判断：{exc}"
             document_before = await asyncio.to_thread(document_version, item)
             evidence, visual_audit = await prepare_visual(tasks, item, evidence)
             if str(item.get("full_text", {}).get("source_path", "")).lower().endswith(".pdf"):
@@ -139,7 +147,18 @@ def run_research_node():
             source_manifests[paper_id] = source_manifest(document_after, evidence, visual_audit)
             visual_audits.append(visual_audit)
             all_evidence.extend(evidence)
-            inputs.append((paper_id, paper.get("title") or paper_id, evidence))
+            paper_scopes[paper_id] = ScopedEvidence(evidence, {paper_id}, retrieval)
+            full_text = item.get('full_text') or {}
+            acquisition = str(full_text.get('status') or 'unknown')
+            failure = load_error or (str(full_text.get('reason') or acquisition)
+                                     if acquisition in {'parse_failed', 'download_failed', 'no_url'} else '')
+            material = 'unavailable'
+            if evidence:
+                material = 'full_text' if any(e.source_level == 'full_text' for e in evidence) else 'abstract'
+            inputs.append(PreparedPaper(paper_id=paper_id, title=paper.get('title') or paper_id,
+                source_version=source_manifests[paper_id]['version'], material=material,
+                acquisition_status='parse_failed' if load_error else acquisition, failure_reason=failure,
+                evidence_ids=[e.id for e in evidence], omitted_visual_pages=visual_audit['omitted_pages']))
         for item in items:
             await prepare_input(item)
         if revision:
@@ -153,12 +172,25 @@ def run_research_node():
                 raise ValueError("修订目标版本与原始判断不一致")
         policy = policy_version(tasks, request.topic, retrieval)
         plan = IncrementalPlan(parent_report, all_evidence, policy, revision, source_manifests)
+        def input_scope():
+            return version_of([policy, checkpoint['request'], revision, sorted(primary_ids),
+                               [p.paper_id for p in inputs]])
+
+        if snapshot.get('scope') != input_scope():
+            snapshot = {}
+        prepared_versions = {p.paper_id: version_of(p.model_dump()) for p in inputs}
+        replay_acquisition = (checkpoint['resume_final_review'] and snapshot.get('prepared_versions') == prepared_versions)
+        restored = {c['paper_id']: PaperCard.model_validate(c) for c in snapshot.get('cards', [])
+                    if snapshot['prepared_versions'].get(c['paper_id']) == prepared_versions.get(c['paper_id'])}
+        core_reviews.extend(s for s in snapshot.get('core_reviews', []) if s['paper_id'] in restored)
         semaphore = asyncio.Semaphore(3)
 
-        async def process(paper_id, title, evidence):
+        async def process(prepared):
+            paper_id, title = prepared.paper_id, prepared.title
+            scope = paper_scopes[paper_id]
+            evidence = scope.read(prepared.evidence_ids)
             async with semaphore:
-                reused_card = plan.card(paper_id)
-                scope = ScopedEvidence(evidence, {paper_id}, retrieval)
+                reused_card = restored.get(paper_id) or plan.card(paper_id)
                 if retrieval and evidence:
                     try:
                         remaining = tasks.deadline - time.monotonic()
@@ -184,7 +216,7 @@ def run_research_node():
                     new_version = version_of({"claim": draft.model_dump(), "sources": [(e.id, e.version) for e in cited], "human_revision": old.version})
                     replacement = Claim(**draft.model_dump(), id=f"{paper_id}:claim:{new_version}", paper_id=paper_id, version=new_version)
                     revised_claims = [replacement if c.id == old.id else c for c in seed.claims]
-                cache_key = version_of({"schema": "paper-card-v6", "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
+                cache_key = version_of({"schema": "paper-card-v6", "prepared_version": version_of(prepared.model_dump()), "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
                     "paper": paper_id, "title": title, "evidence": [e.model_dump() for e in evidence],
                     "model": getattr(llm, "signature", "unknown"),
                     "context_chars": options.context_chars, "repair_rounds": options.max_repair_rounds})
@@ -206,8 +238,8 @@ def run_research_node():
                         card.warnings.extend(audit["warnings"])
                         unread = list(audit["omitted_pages"]) + [page["page"] for page in audit["pages"] if page.get("error")]
                         card.omitted_evidence_ids.extend(f"{paper_id}:unread-visual-page:{page}" for page in unread)
-                if paper_id in input_warnings:
-                    card.warnings.append(input_warnings[paper_id])
+                if prepared.failure_reason:
+                    card.warnings.append(prepared.failure_reason)
                 if not evidence:
                     card.warnings.append("没有可读取的全文或摘要，未进行语义核查")
                 elif any(e.source_level == "abstract" for e in evidence):
@@ -302,7 +334,7 @@ def run_research_node():
                     reporter.progress(f"已完成《{title}》的逐篇阅读核查", paper_id=paper_id)
                 return card
 
-        pending = [asyncio.create_task(process(*value)) for value in inputs if value[0] in primary_ids or options.cross_paper_enabled]
+        pending = [asyncio.create_task(process(value)) for value in inputs if value.paper_id in primary_ids or options.cross_paper_enabled]
         try:
             cards = await asyncio.gather(*pending)
         finally:
@@ -330,7 +362,7 @@ def run_research_node():
             for card in cards:
                 if card.paper_id in primary_ids:
                     key = version_of({'card': card.model_dump(), 'source': source_manifests.get(card.paper_id), 'policy': policy})
-                    previous_plan = next((p for p in (parent_report or {}).get('argument_plans', []) if p.get('dependency_version') == key and p.get('status') == 'planned'), None)
+                    previous_plan = next((p for p in [*snapshot.get('argument_plans', []), *(parent_report or {}).get('argument_plans', [])] if p.get('dependency_version') == key and p.get('status') == 'planned'), None)
                     current_ids = {c.id for c in card.claims}
                     early_arguments = [s['argument'] for s in core_reviews
                         if s['paper_id'] == card.paper_id and s['claim']['id'] in current_ids]
@@ -355,7 +387,8 @@ def run_research_node():
                     local = {'decision': 'disabled', 'reason': '未开启外部查阅', 'evidence_ids': []}
                 elif index >= 3:
                     local = {'decision': 'deferred', 'reason': '已达到本轮缺口核查上限', 'evidence_ids': []}
-                elif previous_reviews.get(question['gap_id'], {}).get('decision') in {'external_needed', 'answered_here'}:
+                elif (question['gap_id'] in previous_reviews and replay_acquisition
+                      or previous_reviews.get(question['gap_id'], {}).get('decision') in {'external_needed', 'answered_here'}):
                     local = previous_reviews[question['gap_id']]
                 else:
                     scope = ScopedEvidence(all_evidence, {question['paper_id']}, retrieval)
@@ -367,13 +400,14 @@ def run_research_node():
             "research_planning_failed": options.reasoning_enabled and any(p['status'] != 'planned' for p in argument_plans)}
         previous_count = len(inputs)
         previous_items = len(items)
-        items, external_search = await supplement_sources(acquisition_state, items, tasks)
+        if not replay_acquisition:
+            items, external_search = await supplement_sources(acquisition_state, items, tasks)
         tasks.remaining_visual_papers = sum(str(i.get('full_text', {}).get('source_path', '')).lower().endswith('.pdf') for i in items[previous_items:])
         for item in items[previous_items:]:
             await prepare_input(item)
         if options.cross_paper_enabled:
             for value in inputs[previous_count:]:
-                cards.append(await process(*value))
+                cards.append(await process(value))
         checkpoint.update(read_results=items, external_search=external_search)
         state['read_resume_checkpoint'] = checkpoint
         await store.save('research_checkpoint', checkpoint)
@@ -430,6 +464,24 @@ def run_research_node():
                         "relations": [r.model_dump() for r in relations[pair_start:]], "verifications": [v.model_dump() for v in checks[pair_start:]]})
                 except (ValueError, RuntimeError, TimeoutError) as exc:
                     warnings.append(str(exc))
+        synthesis_checkpoint = None
+        if options.reasoning_enabled and store.repo and store.session and any(p['status'] == 'planned' for p in argument_plans):
+            planned = {p['paper_id'] for p in argument_plans if p['status'] == 'planned' and p['arguments']}
+            # Freeze the actual upstream material used by this attempt, including bounded coverage.
+            snapshot = {'scope': input_scope(), 'prepared_versions': {p.paper_id: version_of(p.model_dump()) for p in inputs},
+                        'cards': [c.model_dump() for c in cards if c.paper_id in planned],
+                        'core_reviews': core_reviews, 'argument_plans': argument_plans,
+                        'visual_model': getattr(llm, 'signature', None),
+                        'transcriptions': [e.model_dump() for e in all_evidence if e.modality == 'visual_transcription']}
+            for p in argument_plans:
+                p['evidence_questions'] = [q for q in questions if q['paper_id'] == p['paper_id']]
+            key = version_of(snapshot)
+            if not await store.load(key, 'analysis_inputs'):
+                await store.save('analysis_inputs', snapshot, cache_key=key)
+            checkpoint['analysis_inputs_key'] = key
+            synthesis_checkpoint = await store.save('research_checkpoint', checkpoint)
+            if reporter:
+                reporter.progress('已保存综合与复审所需的阅读输入', checkpoint=checkpoint)
         reasoning = []
         if options.reasoning_enabled:
             external_ids = {str(i['paper'].get('paperId') or i['paper'].get('id')) for i in items if i.get('source_role') == 'external_candidate'}
@@ -445,7 +497,7 @@ def run_research_node():
                 argument_plan['evidence_questions'] = paper_questions
                 reasoning.append(await synthesize(tasks, request.topic, card, argument_plan, all_evidence, external_ids & linked, policy,
                     previous=next((r for r in (parent_report or {}).get('reasoning', []) if r['paper_id'] == card.paper_id), None),
-                    source_manifests=source_manifests))
+                    source_manifests=source_manifests, store=store))
                 source = next((item.get('full_text', {}).get('source_path') for item in items
                                if str(item['paper'].get('paperId') or item['paper'].get('id')) == card.paper_id), None)
                 await attach_reading_figures(tasks, reasoning[-1], all_evidence, source, store)
@@ -601,7 +653,7 @@ def run_research_node():
             record = {k: v for k, v in revision.items() if k not in {"history", "seed_card", "evidence_versions"}}
             record["result_claims"] = [{"id": c.id, "version": c.version} for card in cards if card.paper_id == revision["target"]["paper_id"] for c in card.claims]
             revision_history = [*revision.get("history", []), record]
-        report = {"schema_version": 5, "core_reviews": core_reviews,
+        report = {"schema_version": 5, "prepared_papers": [p.model_dump() for p in inputs], "core_reviews": core_reviews,
             "first_core_review_seconds": min((s["elapsed_seconds"] for s in core_reviews), default=None), "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
             "dependencies": dependency_manifest(cards, relations, paragraphs, all_evidence, source_manifests),
             "challenges": challenges, "pair_outcomes": pair_outcomes, "visual": visual_audits, "visual_model": getattr(llm, "signature", None), "output_mode": options.output_mode, "cross_paper_executed": cross_enabled,
@@ -612,6 +664,10 @@ def run_research_node():
             "coverage": {"candidate_policy": "condition_priority_paper_pair_round_robin", "compared_pairs": compared_pairs, "omitted_pairs": omitted_pairs},
             "calls": tasks.calls, "usage": tasks.usage, "retrieval": retrieval_status, "external_search": external_search,
             "revision_history": revision_history}
+        report['role_stats'] = tasks.role_stats
+        report['recovery_trace'] = tasks.recovery_trace
+        if synthesis_checkpoint:
+            report['checkpoint_id'] = synthesis_checkpoint['id']
         await store.save("research_state", report)
         if reporter:
             reporter.completed("研究报告已生成，核查状态与证据已保留", **tasks.usage)

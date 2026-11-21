@@ -139,6 +139,18 @@ class EvidenceSpan(Record):
     transcription_uncertainties: list[str] = Field(default_factory=list)
 
 
+class PreparedPaper(Record):
+    """Versioned handoff from source preparation to the single-paper reader."""
+    paper_id: str = Field(min_length=1)
+    title: str
+    source_version: str
+    material: Literal['full_text', 'abstract', 'unavailable']
+    acquisition_status: str
+    failure_reason: str = ''
+    evidence_ids: list[str]
+    omitted_visual_pages: list[int] = Field(default_factory=list)
+
+
 class StudyContext(Record):
     problem: str = "unknown"
     mechanism: str = "unknown"

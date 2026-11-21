@@ -181,9 +181,9 @@ function formatArtifactSize(size: number) {
 
 /** 拼接产物文件的下载/预览地址，会话还没确定时返回 "#"，避免生成无效链接。 */
 const researchArtifactId = computed(() => [...(timelineSnapshot.value?.artifacts ?? [])].reverse().find(a => a.artifact_type === "research_state")?.id ?? "");
-function onResearchRevision(accepted: SessionRunAccepted) {
+function onResearchRevision(accepted: SessionRunAccepted, message: string) {
   activeRunId.value = accepted.run_id;
-  aggregator.addOptimisticUserMessage("修订判断并重新核查", accepted.turn_id);
+  aggregator.addOptimisticUserMessage(message, accepted.turn_id);
   syncSnapshot();
   emit("refreshSessions");
   openStream(selectedSessionKey.value, accepted.stream_url);
