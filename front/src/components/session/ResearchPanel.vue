@@ -31,7 +31,7 @@ watch(() => [props.sessionKey, props.artifactId], async () => {
 }, { immediate: true });
 const nodes = computed(() => report.value?.relation_graph?.nodes ?? []);
 const edges = computed(() => report.value?.relation_graph?.edges ?? []);
-const labels: Record<string, string> = {equivalent: "同质", extends: "扩展", supports: "支持", conflicts: "冲突", different_scope: "条件不同", incomparable: "无法比较", verified: "当前证据支持", qualified: "需限定", contradicted: "与证据不符", insufficient_evidence: "证据不足", needs_human_review: "待人工复核", supported: "支持", unknown: "未证实", hypothesis: "待验证假设", proposal: "研究建议", supported_inference: "证据推论", unsupported: "不支持", unreviewed: "待审", inconclusive: "不足以判断", challenges: "挑战", different_conditions: "条件不同", matched: "匹配", different: "不同"};
+const labels: Record<string, string> = {exact: "定义或严格推导", approximation: "近似及其条件", empirical: "实验观察", equivalent: "同质", extends: "扩展", supports: "支持", conflicts: "冲突", different_scope: "条件不同", incomparable: "无法比较", verified: "当前证据支持", qualified: "需限定", contradicted: "与证据不符", insufficient_evidence: "证据不足", needs_human_review: "待人工复核", supported: "支持", unknown: "未证实", hypothesis: "待验证假设", proposal: "研究建议", supported_inference: "证据推论", unsupported: "不支持", unreviewed: "待审", inconclusive: "不足以判断", challenges: "挑战", different_conditions: "条件不同", matched: "匹配", different: "不同"};
 function label(value: string) { return labels[value] ?? value; }
 function reasoningCheck(result: ResearchReasoning, kind: string, index: number) {
   const check = result.checks.find(c => c.target_type === kind && c.index === index);
@@ -74,6 +74,18 @@ async function revise() {
         <h4>核心论证与 Insight · {{ result.paper_id }}</h4>
         <p>系统推论和假设不等于作者结论；核查支持不表示已经独立复现。</p>
         <p v-for="warning in result.warnings" :key="warning">{{ warning }}</p>
+        <section v-if="result.method_steps?.length">
+          <h4>算法如何工作</h4>
+          <ol><li v-for="(step, index) in result.method_steps" :key="index">
+            <strong>{{ step.operation }}</strong>
+            <p>输入：{{ step.input }}</p><p>输出与流向：{{ step.output }}</p>
+            <p>设计取舍：{{ step.design_reason }}</p>
+            <p>{{ label(step.basis) }}：{{ step.justification }}</p>
+            <p>失效条件或检验：{{ step.failure_or_test }}</p>
+            <p>{{ reasoningCheck(result, 'method_step', index) }}</p>
+            <button type="button" @click="showEvidence(step.evidence_ids)">查看步骤原文</button>
+          </li></ol>
+        </section>
         <article v-for="(argument, index) in result.arguments" :key="argument.claim_id">
           <h5>{{ argument.thesis }}</h5>
           <p>推理：{{ argument.inference }}</p><p>条件：{{ argument.conditions }}</p>

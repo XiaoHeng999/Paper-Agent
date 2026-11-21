@@ -83,7 +83,23 @@ class ExternalSupport(Record):
     contribution: str = Field(min_length=1)
 
 
+class MethodStep(Record):
+    operation: str = Field(min_length=1)
+    input: str = Field(min_length=1)
+    output: str = Field(min_length=1)
+    design_reason: str = Field(min_length=1)
+    basis: Literal['exact', 'approximation', 'empirical', 'hypothesis']
+    justification: str = Field(min_length=1)
+    failure_or_test: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+METHOD_BASIS = {'exact': '定义或严格推导', 'approximation': '近似及其条件',
+                'empirical': '实验观察', 'hypothesis': '待验证解释'}
+
+
 class Synthesis(Record):
+    method_steps: list[MethodStep] = Field(default_factory=list, max_length=5)
     arguments: list[Argument] = Field(max_length=4)
     insights: list[Insight] = Field(default_factory=list, max_length=4)
     external_support: list[ExternalSupport] = Field(default_factory=list, max_length=6)
@@ -91,7 +107,7 @@ class Synthesis(Record):
 
 class ReasoningCheck(Record):
     citation_verdict: Literal['comparison', 'non_comparison', 'withhold'] = 'withhold'
-    target_type: Literal['argument', 'insight', 'external_support']
+    target_type: Literal['argument', 'insight', 'external_support', 'method_step']
     index: int = Field(ge=0)
     verdict: Literal['supported', 'qualified', 'unsupported']
     reason: str = Field(min_length=1)
@@ -99,7 +115,7 @@ class ReasoningCheck(Record):
 
 
 class ReasoningReview(Record):
-    checks: list[ReasoningCheck] = Field(max_length=14)
+    checks: list[ReasoningCheck] = Field(max_length=19)
 
 
 async def ask_scoped(tasks, role, instruction, payload, schema, claims, evidence):
@@ -190,10 +206,17 @@ def reviewed_citation(argument, review, primary_check, evidence, paper_id):
 
 
 async def plan_arguments(tasks, question, card, evidence):
-    selected = select_evidence(evidence, [eid for c in card.claims for eid in c.evidence_ids], tasks.options.context_chars)
+    mechanism = next((c for c in card.claims if c.kind == 'method'), None)
+    anchors = mechanism.evidence_ids if mechanism else []
+    selected = select_evidence(evidence, anchors + [eid for c in card.claims for eid in c.evidence_ids], tasks.options.context_chars)
     supplied = {e.id: e for e in selected}
     claims = {c.id: c for c in card.claims if set(c.evidence_ids) <= supplied.keys()}
-    claims = dict(list(claims.items())[:8])
+    # Keep at least one mechanism claim in view when the reader found many results.
+    candidates = list(claims.values())[:8]
+    mechanism = next((c for c in claims.values() if c.kind == 'method'), None)
+    if mechanism and mechanism not in candidates:
+        candidates[-1] = mechanism
+    claims = {c.id: c for c in candidates}
     if not claims:
         return {'paper_id': card.paper_id, 'status': 'unavailable', 'arguments': [], 'warnings': ['没有预算内可引用的主张']}
     try:
@@ -260,6 +283,8 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
     external = [e for e in evidence if e.paper_id in external_ids]
     question_map = {q['gap_id']: q for q in plan.get('evidence_questions', [])}
     preferred = [eid for a in plan['arguments'] for eid in a['evidence_ids']]
+    if not argument_only:
+        preferred += [eid for c in card.claims if c.kind == 'method' for eid in c.evidence_ids]
     preferred += [eid for q in question_map.values() for eid in q['local_review']['evidence_ids']]
     # Give external candidates space without replacing the primary paper's evidence.
     selected = select_evidence(local, preferred, tasks.options.context_chars * (2 if external else 3) // 3)
@@ -286,7 +311,11 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             draft = Synthesis(arguments=plan['arguments'])
         else:
             draft = await ask_scoped(tasks, 'research_synthesis',
-                '更新主论文的论证并提出有推导依据的insight。只使用所给原文。外部候选不是已确认佐证：'
+                '若用户明确只问特定数字等窄问题，遵循其范围。对一般阅读或方法问题，针对提出算法的主论文先用 method_steps 帮初学者重建作者的方法。用同一个具体输入按执行顺序走一遍，'
+                '写清每步输入、实际操作、输出流向，朴素做法的瓶颈和为何选此设计。解释关键设计为什么有效：'
+                '区分严格等价、带条件的近似、消融的实验证据和系统提出的假设。给出假设失效的具体输入或可区分的对照实验。'
+                '每步只引用主论文已提供的全文。综述、仅摘要、或无法定位算法细节时返回空列表，不虚构组件。'
+                '面向学生解释符号。洞见尽量从设计步骤的近似或取舍推导。更新主论文的论证并提出有推导依据的insight。只使用所给原文。外部候选不是已确认佐证：'
                 '逐条记录它支持或挑战论证的哪一步及任务/指标/预算/条件可比性；摘要不能验证实验充分性。'
                 '没有可比证据时写inconclusive或different_conditions，不要凑引用。'
                 'insight区分supported_inference/hypothesis/proposal，给出推导、不确定性和区分替代解释的具体实验；'
@@ -299,6 +328,10 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                  'evidence_questions': list(question_map.values()), 'external_candidate_ids': sorted(external_ids), 'evidence': [e.model_dump() for e in selected]}, Synthesis, claims, supplied)
         if not draft.arguments:
             raise ValueError('综合步骤未返回论证，保留原计划待审')
+        primary_fulltext = {e.id for e in selected if e.paper_id == card.paper_id and e.source_level == 'full_text'}
+        if any(not set(step.evidence_ids) <= primary_fulltext for step in draft.method_steps):
+            result['warnings'].append('方法重建未展示：至少一步缺少本次提供的主论文全文依据')
+            draft.method_steps = []
         validate_arguments(draft.arguments, claims, supplied)
         for insight in draft.insights:
             if insight.prediction.casefold() == insight.weakening_observation.casefold():
@@ -328,6 +361,8 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                 raise ValueError('见解的外部证据未关联对应缺口的判断')
         result.update(draft.model_dump(), status='unreviewed')
         review = await ask_scoped(tasks, 'reasoning_verifier',
+            '以method_step为target_type逐步核查算法重建：数据流、设计动机是否有原文依据，'
+            '推导是否成立，近似是否说明条件，实验能否区分所称机制；对系统推测只评价可检验性。'
             '独立检查每条argument、insight及external_support。为每个对象返回且仅返回一条核查。'
             '对照缺口的可比条件检查外部关系；检查每条见解是否给出可观察且能区分替代解释的预测和削弱结果。'
             '检查证据→推理→结论是否跳步、替代解释、条件可比性、是否只是重复作者摘要。'
@@ -339,7 +374,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
             {'primary_paper_id': card.paper_id, 'synthesis': draft.model_dump(), 'evidence_questions': list(question_map.values()),
              'claim_verifications': [check_summary(v, supplied) for v in card.verifications if v.target_id in claims],
              'evidence': [e.model_dump() for e in selected]}, ReasoningReview, claims, supplied)
-        groups = {'argument': draft.arguments, 'insight': draft.insights, 'external_support': draft.external_support}
+        groups = {'method_step': draft.method_steps, 'argument': draft.arguments, 'insight': draft.insights, 'external_support': draft.external_support}
         expected = {(kind, i) for kind, values in groups.items() for i in range(len(values))}
         seen = set()
         for check in review.checks:
@@ -354,6 +389,10 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                     or not {supplied[eid].paper_id for eid in target.evidence_ids} <= {supplied[eid].paper_id for eid in check.evidence_ids}):
                 check.verdict = 'qualified'
                 check.reason += '；摘要或核查来源覆盖不足，不能视为完整验证'
+            if (check.target_type == 'method_step' and check.verdict == 'supported'
+                    and not set(check.evidence_ids).intersection(target.evidence_ids)):
+                check.verdict = 'qualified'
+                check.reason += '；核查未定位该步骤引用的原文'
             dependent_ids = ([target.claim_id] if check.target_type == 'argument' else target.claim_ids if check.target_type == 'insight' else [])
             if check.verdict == 'supported' and (check.target_type == 'argument' or (check.target_type == 'insight' and target.epistemic_status == 'supported_inference')):
                 if any(not any(v.target_id == cid and v.target_version == claims[cid].version and v.verdict == 'verified' for v in card.verifications) for cid in dependent_ids):
@@ -369,7 +408,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
                 support = draft.external_support[check.index]
                 approved_links.update((support.argument_index, support.gap_id, eid) for eid in support.evidence_ids)
         for check in review.checks:
-            if check.verdict != 'supported' or check.target_type == 'external_support':
+            if check.verdict != 'supported' or check.target_type in {'external_support', 'method_step'}:
                 continue
             target = groups[check.target_type][check.index]
             if check.target_type == 'argument':
@@ -426,6 +465,15 @@ def render_reasoning(results):
     for result in results:
         lines.append('## 主论文：' + result['paper_id'])
         lines.extend('> ' + w for w in result['warnings'])
+        reviews = {(c['target_type'], c['index']): c for c in result['checks']}
+        if result.get('method_steps'):
+            lines.append('## 算法如何工作')
+        for i, step in enumerate(result.get('method_steps', [])):
+            check = reviews.get(('method_step', i), {'verdict': 'unreviewed', 'reason': '尚未完成独立核查'})
+            lines.extend([f"### {i+1}. {step['operation']}", '输入：' + step['input'], '输出与流向：' + step['output'],
+                          '设计取舍：' + step['design_reason'], METHOD_BASIS[step['basis']] + '：' + step['justification'],
+                          '失效条件或检验：' + step['failure_or_test'], '原文：' + '、'.join(step['evidence_ids']),
+                          f"步骤核查（{check['verdict']}）：{check['reason']}"])
         for gap in result.get('evidence_questions', []):
             if gap['local_review']['decision'] == 'external_needed' and not gap['candidate_ids']:
                 lines.append('该缺口尚无可用外部候选，保留当前判断。')
@@ -434,10 +482,9 @@ def render_reasoning(results):
                           '比较条件：' + gap['comparable_conditions'], '外查停止条件：' + gap['stopping_rule'],
                           '本文核查与外查决定：' + gap['local_review']['reason'],
                           '本文依据：' + ('、'.join(gap['local_review']['evidence_ids']) or '无定向核查引文')])
-        checks = {(c['target_type'], c['index']): c for c in result['checks']}
         for kind, values in [('argument', result['arguments']), ('external_support', result['external_support']), ('insight', result['insights'])]:
             for i, value in enumerate(values):
-                check = checks.get((kind, i), {'verdict': 'unreviewed', 'reason': '尚未完成独立核查'})
+                check = reviews.get((kind, i), {'verdict': 'unreviewed', 'reason': '尚未完成独立核查'})
                 labels = {'thesis':'主张','inference':'推理桥梁','conditions':'成立条件','alternative_explanation':'替代解释','falsification':'反驳条件','conclusion':'当前结论','statement':'见解','derivation':'推导','uncertainty':'不确定性','prediction':'预期观察','weakening_observation':'会削弱判断的观察','distinguishing_test':'验证实验','comparability':'可比条件','contribution':'证据贡献','relation':'佐证关系','epistemic_status':'认识状态'}
                 lines.append(f"### {dict(argument='论证', external_support='外部佐证', insight='Insight')[kind]} {i+1}（{check['verdict']}）")
                 lines.extend(f'{label}：{value[key]}' for key, label in labels.items() if key in value)

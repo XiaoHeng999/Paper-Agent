@@ -70,6 +70,40 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
     def task(self, model, **constraints):
         return state(model, research_reasoning_enabled=True, **constraints)
 
+    async def test_method_reconstruction_is_reviewed_against_primary_fulltext(self):
+        class MethodModel(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                response = await super(MethodModel, model).chat(messages, **kwargs)
+                payload = json.loads(messages[-1]['content'])
+                value = json.loads(response.content)
+                if payload['role'] == 'research_synthesis':
+                    value['method_steps'] = [{
+                        'operation':'池化后再路由', 'input':'查询块与键块', 'output':'候选块进入精算',
+                        'design_reason':'减少排序开销', 'basis':'approximation',
+                        'justification':'用块均值近似，依赖块内差异较小', 'failure_or_test':'固定掩码增大块内差异',
+                        'evidence_ids':[payload['evidence'][0]['id']]}]
+                if payload['role'] == 'reasoning_verifier' and payload['synthesis'].get('method_steps'):
+                    value['checks'].append({'target_type':'method_step','index':0,'verdict':'qualified',
+                                            'reason':'需要控制块内差异', 'evidence_ids':payload['synthesis']['method_steps'][0]['evidence_ids']})
+                response.content = json.dumps(value)
+                return response
+
+        for level in ('full_text', 'abstract'):
+            source = EvidenceSpan(id='s', paper_id='p1', version='1', source_level=level, text='使用池化键路由')
+            with self.subTest(level=level), patch('src.research.workflow.load_evidence', return_value=[source]):
+                output = await run_research_node()(self.task(MethodModel()))
+                result = output['research_report']['reasoning'][0]
+                self.assertEqual(result['status'], 'reviewed')
+                if level == 'full_text':
+                    self.assertEqual(result['method_steps'][0]['evidence_ids'], ['s'])
+                    self.assertEqual(next(c['verdict'] for c in result['checks'] if c['target_type']=='method_step'), 'qualified')
+                    self.assertIn('近似及其条件', output['research_markdown'])
+                    self.assertLess(output['research_markdown'].index('算法如何工作'), output['research_markdown'].index('推理桥梁'))
+                else:
+                    self.assertFalse(result['method_steps'])
+                    self.assertNotIn('算法如何工作', output['research_markdown'])
+                    self.assertTrue(result['arguments'])
+
     async def test_single_paper_reasoning_and_insights_are_delivered_without_search(self):
         model = ReasoningModel()
         task = self.task(model)

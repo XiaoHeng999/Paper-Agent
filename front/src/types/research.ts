@@ -10,7 +10,12 @@ export interface EvidenceQuestion {
   prediction: string; weakening_observation: string; stopping_rule: string;
   local_review: { decision: string; reason: string; evidence_ids: string[] }; candidate_ids: string[];
 }
-export interface ResearchReasoning { evidence_questions?: EvidenceQuestion[]; paper_id: string; status: string; arguments: Argument[]; insights: Insight[]; external_support: Array<{gap_id?: string; argument_index: number; relation: string; comparability: string; contribution: string; evidence_ids: string[]}>; checks: Array<{target_type: string; index: number; verdict: string; reason: string; judgment_update?: string; citation?: ReviewedCitation | null}>; warnings: string[]; omitted_evidence_ids: string[] }
+export interface MethodStep {
+  operation: string; input: string; output: string; design_reason: string;
+  basis: 'exact' | 'approximation' | 'empirical' | 'hypothesis';
+  justification: string; failure_or_test: string; evidence_ids: string[];
+}
+export interface ResearchReasoning { method_steps?: MethodStep[]; evidence_questions?: EvidenceQuestion[]; paper_id: string; status: string; arguments: Argument[]; insights: Insight[]; external_support: Array<{gap_id?: string; argument_index: number; relation: string; comparability: string; contribution: string; evidence_ids: string[]}>; checks: Array<{target_type: string; index: number; verdict: string; reason: string; judgment_update?: string; citation?: ReviewedCitation | null}>; warnings: string[]; omitted_evidence_ids: string[] }
 export interface Evidence { modality?: string; id: string; paper_id: string; text: string; source_level: string; page_start: number | null; section: string }
 export interface Claim { id: string; version: string; paper_id: string; statement: string; conditions: string; experiment: string; study?: Record<string, string>; evidence_ids: string[] }
 export interface Check { status: string; reason: string; evidence_ids: string[] }

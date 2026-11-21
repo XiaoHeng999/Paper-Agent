@@ -108,8 +108,8 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
     supplied_ids = set(evidence_ids) | {e.id for e in anchors}
     schema = ClaimDraft if feedback else FocusedClaimBatch if core_questions is not None else ClaimBatch
     focus = ("根据用户问题选出最多两个最影响结论、且现有证据可审查的不同问题，写入 core_questions，"
-             "用从零开始的 claim_index 关联 claims；按重要性排序。") if core_questions is not None else ""
-    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。" + focus, {
+             "算法论文的一般性阅读或方法类提问，优先保留一个可回查的核心设计问题；用户指定只看特定结果时遵循其范围。用从零开始的 claim_index 关联 claims；按重要性排序。") if core_questions is not None else ""
+    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。算法论文须抽取方法判断：沿同一输入追踪实际操作、输出及下一步用途，定位关键公式、近似前提和机制消融。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。" + focus, {
         "question": question, "paper_id": paper_id,
         "evidence": [item.model_dump() for item in evidence], "context_evidence": [item.model_dump() for item in anchors],
         "primary_evidence_ids": evidence_ids, "feedback": feedback,
