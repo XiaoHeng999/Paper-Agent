@@ -28,6 +28,10 @@ class ReasoningModel(FakeModel):
     async def chat(self, messages, **kwargs):
         p = json.loads(messages[-1]['content'])
         role = p['role']
+        if role == 'local_gap_review':
+            self.requests.append(p)
+            return LLMResponse(content=json.dumps({'decision': 'external_needed', 'reason':'本文未给独立同预算实验',
+                                                    'evidence_ids':[p['evidence'][0]['id']]}))
         if role not in {'argument_builder', 'research_synthesis', 'reasoning_verifier'}:
             return await super().chat(messages, **kwargs)
         self.requests.append(p)
@@ -37,18 +41,20 @@ class ReasoningModel(FakeModel):
                 'inference': '同预算消融支持该机制贡献，但未排除实现因素', 'conditions': 'matched budget',
                 'alternative_explanation': 'kernel implementation', 'falsification': 'matched kernels remove gain',
                 'conclusion': '有条件支持，依据 '+c['evidence_ids'][0], 'gaps': [{'question':'是否有独立同预算消融', 'why_material':'区分机制与实现收益',
+                    'hypothesis':'补偿能减少误差', 'prediction':'匹配预算时误差降低',
+                    'weakening_observation':'匹配预算后误差没有降低','comparable_conditions':'相同核与稀疏率',
                     'search_query':'matched budget routing correction ablation', 'stopping_rule':'找到同预算消融或保留未知'}] if self.gap else []}
             value = {'arguments':[argument]}
         elif role == 'research_synthesis':
             args = p['arguments']
             external = [e for e in p['evidence'] if e['paper_id'] in p['external_candidate_ids']]
-            support = [{'argument_index':0, 'evidence_ids':[external[0]['id']], 'relation':'supports',
+            support = [{'gap_id':p['evidence_questions'][0]['gap_id'], 'argument_index':0, 'evidence_ids':[external[0]['id']], 'relation':'supports',
                 'comparability':'same task, budget unknown', 'contribution':'independent mechanism observation'}] if external else []
             value = {'arguments':args, 'external_support':support, 'insights':[{
                 'claim_ids':[args[0]['claim_id']], 'argument_indices':[0], 'kind':'boundary', 'epistemic_status':'hypothesis',
                 'statement':'共享代理信号可能产生共同失效条件', 'derivation':'路由和补偿复用同一信号，因此可能共同受噪声影响',
                 'evidence_ids': ['invented'] if self.bad_citation else args[0]['evidence_ids'],
-                'uncertainty':'未做噪声干预', 'distinguishing_test':'固定预算注入代理噪声并分别关闭路由和补偿'}]}
+                'prediction':'噪声增大时两者误差同步升高','weakening_observation':'干预后两者误差独立变化','uncertainty':'未做噪声干预', 'distinguishing_test':'固定预算注入代理噪声并分别关闭路由和补偿'}]}
             if self.foreign_argument:
                 value['insights'][0]['argument_indices'] = [99]
         else:
@@ -99,7 +105,99 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('cross_paper_analyst',[p['role'] for p in model.requests])
         support_check = next(c for c in r['reasoning'][0]['checks'] if c['target_type']=='external_support')
         self.assertEqual(support_check['verdict'],'qualified')
+        self.assertIn('保留判断', support_check['judgment_update'])
+        self.assertEqual(r['reasoning'][0]['external_support'][0]['gap_id'], r['research_questions'][0]['gap_id'])
         self.assertEqual(len(r['references']),2)
+
+    async def test_local_answer_uncertainty_and_invalid_citations_do_not_trigger_search(self):
+        class LocalReview(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                payload = json.loads(messages[-1]['content'])
+                if payload['role'] == 'local_gap_review':
+                    eid = payload['evidence'][0]['id'] if decision != 'external_needed' else 'unseen'
+                    return LLMResponse(content=json.dumps({'decision': decision, 'reason':'已回查消融条件',
+                                                          'evidence_ids':[eid]}))
+                return await super(LocalReview, model).chat(messages, **kwargs)
+        for decision, expected in [('answered_here','not_needed'), ('unresolved','unresolved'),
+                                   ('external_needed','unresolved')]:
+            with self.subTest(decision=decision):
+                task = self.task(LocalReview(), allow_external_search=True)
+                search = AsyncMock()
+                task['research_search_service'] = SimpleNamespace(async_search=search)
+                output = await run_research_node()(task)
+                report = output['research_report']
+                search.assert_not_called()
+                self.assertEqual(report['external_search']['status'], expected)
+                gap = report['reasoning'][0]['evidence_questions'][0]
+                self.assertFalse(gap['candidate_ids'])
+                self.assertTrue(gap['comparable_conditions'])
+                self.assertIn(report['reasoning'][0]['insights'][0]['weakening_observation'],
+                              output['research_markdown'])
+
+    async def test_reviewed_fulltext_can_strengthen_or_weaken_a_specific_hypothesis(self):
+        class LinkedInsight(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                p = json.loads(messages[-1]['content'])
+                response = await super(LinkedInsight, model).chat(messages, **kwargs)
+                if p['role'] == 'research_synthesis':
+                    data = json.loads(response.content)
+                    support = data['external_support'][0]
+                    support['relation'] = relation
+                    insight = data['insights'][0]
+                    insight['gap_ids'] = [support['gap_id']]
+                    insight['evidence_ids'].extend(support['evidence_ids'])
+                    response.content = json.dumps(data)
+                return response
+        def fulltext(item):
+            pid = item['paper']['paperId']
+            return [EvidenceSpan(id=pid+'_span', paper_id=pid, version='v1', text='Matched ablation',
+                                 source_level='full_text')]
+        for relation, update in [('supports','增强判断'), ('challenges','削弱判断'),
+                                 ('different_conditions','条件不同，保留判断')]:
+            with self.subTest(relation=relation):
+                task = self.task(LinkedInsight(), allow_external_search=True)
+                task['research_search_service'] = SimpleNamespace(async_search=AsyncMock(return_value=SimpleNamespace(
+                    errors={}, papers=[PaperDocument(id='ext', paperId='ext', title='Independent experiment')])))
+                with patch('src.research.workflow.load_evidence', side_effect=fulltext), patch(
+                        'src.research.supplement.async_download_paper_fulltext', AsyncMock(return_value=SimpleNamespace(file_path=None))):
+                    output = await run_research_node()(task)
+                result = output['research_report']['reasoning'][0]
+                gid = result['evidence_questions'][0]['gap_id']
+                self.assertEqual(result['insights'][0]['gap_ids'], [gid])
+                self.assertIn('ext_span', result['insights'][0]['evidence_ids'])
+                self.assertEqual(result['external_support'][0]['gap_id'], gid)
+                self.assertIn('对判断的影响：'+update, output['research_markdown'])
+
+    async def test_two_gaps_cannot_exchange_candidates_even_within_one_argument(self):
+        class Swapped(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                p = json.loads(messages[-1]['content'])
+                response = await super(Swapped, model).chat(messages, **kwargs)
+                data = json.loads(response.content)
+                if p['role'] == 'argument_builder':
+                    gaps = data['arguments'][0]['gaps']
+                    gaps.append({**gaps[0], 'question': '换硬件后如何？', 'search_query': 'matched hardware'})
+                if p['role'] == 'research_synthesis':
+                    by_id = {e['id']: e for e in p['evidence']}
+                    support = data['external_support'][0]
+                    source = by_id[support['evidence_ids'][0]]['paper_id']
+                    support['gap_id'] = next(q['gap_id'] for q in p['evidence_questions']
+                                             if source not in q['candidate_ids'])
+                response.content = json.dumps(data)
+                return response
+        task = self.task(Swapped(), allow_external_search=True, external_paper_limit=2)
+        service = SimpleNamespace(async_search=AsyncMock(side_effect=[
+            SimpleNamespace(errors={}, papers=[PaperDocument(id=pid, paperId=pid, title=pid, abstract='comparison')])
+            for pid in ('ext1', 'ext2')]))
+        task['research_search_service'] = service
+        with patch('src.research.supplement.async_download_paper_fulltext', AsyncMock(return_value=SimpleNamespace(file_path=None))):
+            report = (await run_research_node()(task))['research_report']
+        self.assertEqual(service.async_search.await_count, 2)
+        result = report['reasoning'][0]
+        self.assertEqual([q['candidate_ids'] for q in result['evidence_questions']], [['ext1'], ['ext2']])
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertFalse(result['external_support'])
+        self.assertIn('不匹配', result['warnings'][-1])
 
     async def test_core_question_is_reviewed_and_saved_before_secondary_verification(self):
         class RankedReader(ReasoningModel):

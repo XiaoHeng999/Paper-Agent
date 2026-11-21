@@ -16,7 +16,7 @@ from .visual import prepare_visual
 from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
-from .reasoning import plan_arguments, research_questions, synthesize, render_reasoning, review_core_question, render_core_review
+from .reasoning import plan_arguments, research_questions, check_local_gap, synthesize, render_reasoning, review_core_question, render_core_review
 from .incremental import IncrementalPlan, policy_version, dependency_manifest
 
 
@@ -342,7 +342,24 @@ def run_research_node():
                     argument_plan['dependency_version'] = key
                     argument_plans.append(argument_plan)
         questions = research_questions(argument_plans, cards) if options.reasoning_enabled else challenges
-        acquisition_state = {**state, "research_challenges": questions,
+        search_questions = questions
+        if options.reasoning_enabled:
+            previous_reviews = {q['gap_id']: q['local_review'] for p in argument_plans
+                                for q in p.get('evidence_questions', []) if q.get('local_review')}
+            for index, question in enumerate(questions):
+                if not options.allow_external_search:
+                    local = {'decision': 'disabled', 'reason': '未开启外部查阅', 'evidence_ids': []}
+                elif index >= 3:
+                    local = {'decision': 'deferred', 'reason': '已达到本轮缺口核查上限', 'evidence_ids': []}
+                elif previous_reviews.get(question['gap_id'], {}).get('decision') in {'external_needed', 'answered_here'}:
+                    local = previous_reviews[question['gap_id']]
+                else:
+                    scope = ScopedEvidence(all_evidence, {question['paper_id']}, retrieval)
+                    local = await check_local_gap(tasks, question, scope)
+                question['local_review'] = local
+            search_questions = [q for q in questions if q['local_review']['decision'] == 'external_needed']
+        acquisition_state = {**state, "research_challenges": search_questions,
+            "unresolved_local_gaps": any(q.get('local_review', {}).get('decision') in {'unresolved','deferred'} for q in questions),
             "research_planning_failed": options.reasoning_enabled and any(p['status'] != 'planned' for p in argument_plans)}
         previous_count = len(inputs)
         previous_items = len(items)
@@ -414,9 +431,16 @@ def run_research_node():
             external_ids = {str(i['paper'].get('paperId') or i['paper'].get('id')) for i in items if i.get('source_role') == 'external_candidate'}
             for argument_plan in argument_plans:
                 card = next(c for c in cards if c.paper_id == argument_plan['paper_id'])
-                # A candidate belongs only to the questions that acquired it, not every primary paper.
-                linked = {str(i['paper'].get('paperId') or i['paper'].get('id')) for i in items
-                    if i.get('source_role') == 'external_candidate' and card.paper_id in i.get('support_for_paper_ids', [])}
+                paper_questions = [q for q in questions if q['paper_id'] == card.paper_id]
+                linked = set()
+                for q in paper_questions:
+                    q['candidate_ids'] = sorted({str(i['paper'].get('paperId') or i['paper'].get('id'))
+                        for i in items if i.get('source_role') == 'external_candidate'
+                        and q['local_review']['decision'] == 'external_needed'
+                        and q['gap_id'] in i.get('acquisition_gap_ids', [])})
+                    linked.update(q['candidate_ids'])
+                    q['acquisition_status'] = external_search['status'] if q['local_review']['decision'] == 'external_needed' else 'not_requested'
+                argument_plan['evidence_questions'] = paper_questions
                 reasoning.append(await synthesize(tasks, request.topic, card, argument_plan, all_evidence, external_ids & linked, policy,
                     previous=next((r for r in (parent_report or {}).get('reasoning', []) if r['paper_id'] == card.paper_id), None),
                     source_manifests=source_manifests))

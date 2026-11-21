@@ -91,15 +91,28 @@ async function revise() {
           <p v-for="gap in argument.gaps" :key="gap.question">待补证：{{ gap.question }}；影响：{{ gap.why_material }}；停止标准：{{ gap.stopping_rule }}</p>
           <button type="button" @click="showEvidence(argument.evidence_ids)">查看论证原文</button>
         </article>
+        <details v-for="q in result.evidence_questions" :key="q.gap_id">
+          <summary>{{ q.question }}</summary>
+          <p>假设：{{ q.hypothesis }}</p><p>预期观察：{{ q.prediction }}</p>
+          <p>会削弱判断的观察：{{ q.weakening_observation }}</p>
+          <p>比较条件：{{ q.comparable_conditions }}</p><p>外查停止条件：{{ q.stopping_rule }}</p>
+          <p v-if="q.local_review.decision === 'external_needed' && !q.candidate_ids.length">该缺口尚无可用外部候选，保留当前判断。</p>
+          <p>本文核查与外查决定：{{ q.local_review.reason }}</p>
+          <button v-if="q.local_review.evidence_ids.length" @click="showEvidence(q.local_review.evidence_ids)">查看本文依据</button>
+        </details>
         <article v-for="(support, index) in result.external_support" :key="`support-${index}`">
           <h5>论证 {{ support.argument_index + 1 }} 的外部证据：{{ label(support.relation) }}</h5>
+          <p v-if="support.gap_id">对应问题：{{ result.evidence_questions?.find(q => q.gap_id === support.gap_id)?.question }}</p>
+          <p>对判断的影响：{{ result.checks.find(c => c.target_type === 'external_support' && c.index === index)?.judgment_update ?? '待核查' }}</p>
           <p>{{ support.contribution }}</p><p>可比性：{{ support.comparability }}</p>
           <p>{{ reasoningCheck(result, 'external_support', index) }}</p>
           <button type="button" @click="showEvidence(support.evidence_ids)">查看外部证据</button>
         </article>
         <article v-for="(insight, index) in result.insights" :key="`insight-${index}`">
           <h5>{{ label(insight.epistemic_status) }}：{{ insight.statement }}</h5>
+          <p v-for="q in result.evidence_questions?.filter(q => insight.gap_ids?.includes(q.gap_id))" :key="q.gap_id">对应证据缺口：{{ q.question }}</p>
           <p>推导：{{ insight.derivation }}</p><p>不确定性：{{ insight.uncertainty }}</p>
+          <p v-if="insight.prediction">预期观察：{{ insight.prediction }}</p><p v-if="insight.weakening_observation">会削弱判断的观察：{{ insight.weakening_observation }}</p>
           <p>验证实验：{{ insight.distinguishing_test }}</p><p>{{ reasoningCheck(result, 'insight', index) }}</p>
           <button type="button" @click="showEvidence(insight.evidence_ids)">查看推导依据</button>
         </article>

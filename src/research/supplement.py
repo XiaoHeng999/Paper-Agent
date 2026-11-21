@@ -24,11 +24,14 @@ def source_keys(paper):
 async def supplement_sources(state, items, tasks):
     options = tasks.options
     previous = (state.get("read_resume_checkpoint") or {}).get("external_search")
-    if previous and previous.get("attempted"):
-        return items, previous
     audit = {"attempted": False, "status": "disabled", "added_paper_ids": [], "warnings": []}
     if not options.allow_external_search or not items:
         return items, audit
+    challenges = state.get('research_challenges', [])[:3]
+    def question_keys(questions):
+        return [q.get('gap_id') or (q['claim_id'], q.get('required_test')) for q in questions]
+    if previous and previous.get("attempted") and question_keys(previous.get('questions', [])) == question_keys(challenges):
+        return items, previous
     if getattr(tasks, 'terminal_error', None):
         audit.update(status='blocked', warnings=[tasks.terminal_error])
         return items, audit
@@ -41,7 +44,9 @@ async def supplement_sources(state, items, tasks):
     if tasks.cancellation:
         tasks.cancellation.raise_if_requested()
     request = state["request"]
-    challenges = state.get('research_challenges', [])[:3]
+    if not challenges and state.get('unresolved_local_gaps'):
+        audit.update(status='unresolved', warnings=['本文核查未能授权定向外查，缺口保留为未决'])
+        return items, audit
     if not challenges:
         audit.update(status='not_needed', warnings=['没有会改变当前结论的明确证据缺口，未启动外部补搜'])
         return items, audit
@@ -74,16 +79,19 @@ async def supplement_sources(state, items, tasks):
                     tasks.cancellation.raise_if_requested()
                 paper_id = paper.paperId or paper.id
                 candidate_keys = source_keys(paper.to_dict())
-                existing = next((i for i in added if source_keys(i['paper']) & candidate_keys), None)
+                existing = next((i for i in [*items, *added] if i.get('source_role') == 'external_candidate' and source_keys(i['paper']) & candidate_keys), None)
                 if existing is not None:
+                    gap_ids = existing.setdefault('acquisition_gap_ids', [])
+                    if challenge.get('gap_id') and challenge['gap_id'] not in gap_ids:
+                        gap_ids.append(challenge['gap_id'])
                     pid = challenge.get('paper_id')
-                    if pid and pid not in existing['support_for_paper_ids']:
+                    if pid and pid not in existing.setdefault('support_for_paper_ids', []):
                         existing['support_for_paper_ids'].append(pid)
                 if candidate_keys & seen_sources or paper_id in seen or len(added) >= options.external_paper_limit:
                     continue
                 seen.add(paper_id)
                 seen_sources.update(candidate_keys)
-                value = {"paper": paper.to_dict(), "full_text": {}, "source_role": "external_candidate", "support_for_paper_ids": [challenge["paper_id"]] if challenge.get("paper_id") else [], "acquisition_question": challenge}
+                value = {"paper": paper.to_dict(), "full_text": {}, "source_role": "external_candidate", "support_for_paper_ids": [challenge["paper_id"]] if challenge.get("paper_id") else [], "acquisition_question": dict(challenge), "acquisition_gap_ids": [challenge["gap_id"]] if challenge.get("gap_id") else []}
                 added.append(value)  # Keep a discovered candidate even if its download times out.
                 audit["added_paper_ids"].append(paper_id)
                 downloaded = await async_download_paper_fulltext(paper, cache_dir=config.paper_cache_dir,
