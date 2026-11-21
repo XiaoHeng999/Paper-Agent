@@ -79,6 +79,15 @@ async function revise() {
           <p>推理：{{ argument.inference }}</p><p>条件：{{ argument.conditions }}</p>
           <p>替代解释：{{ argument.alternative_explanation }}</p><p>证伪条件：{{ argument.falsification }}</p>
           <p>结论：{{ argument.conclusion }}</p><p>{{ reasoningCheck(result, 'argument', index) }}</p>
+          <template v-for="check in result.checks.filter(c => c.target_type === 'argument' && c.index === index)" :key="check.index">
+            <div v-if="check.citation">
+              <p><strong>可引用转述</strong>　{{ check.citation.sentence }}</p>
+              <p>引用边界：{{ check.citation.overreach }}</p>
+              <blockquote>{{ check.citation.excerpt }}</blockquote>
+              <button type="button" @click="showEvidence([check.citation.evidence_id])">查看决定性原文 {{ check.citation.page_start ? '· 第 ' + check.citation.page_start + ' 页' : check.citation.section }}</button>
+            </div>
+            <p v-else-if="check.citation === null">尚无通过核查的转述</p>
+          </template>
           <p v-for="gap in argument.gaps" :key="gap.question">待补证：{{ gap.question }}；影响：{{ gap.why_material }}；停止标准：{{ gap.stopping_rule }}</p>
           <button type="button" @click="showEvidence(argument.evidence_ids)">查看论证原文</button>
         </article>

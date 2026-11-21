@@ -147,6 +147,56 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([p['role'] for p in model.requests[:4]],
                                  ['paper_reader', 'evidence_verifier', 'argument_builder', 'reasoning_verifier'])
 
+    async def test_citable_paraphrase_requires_scoped_review_and_a_matching_passage(self):
+        # Controlled figure-7 fixture: the first latency is the system baseline;
+        # the second already includes fusion and caching.
+        excerpt = "HunyuanVideo on B200: baseline 866.9 s, fused and cached 328.4 s, full system 170.6 s."
+        sentence = "作者报告，在 B200 的 HunyuanVideo 实验中，完整系统相对初始基线的端到端加速为 5.08 倍。"
+        span = EvidenceSpan(id='p1:figure7', paper_id='p1', version='v1', source_level='full_text',
+                            section='System integration', page_start=8, text=excerpt)
+
+        class CitationModel(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                p = json.loads(messages[-1]['content'])
+                response = await super(CitationModel, model).chat(messages, **kwargs)
+                data = json.loads(response.content)
+                if p['role'] == 'paper_reader':
+                    data['claims'][0]['statement'] = sentence
+                if p['role'] == 'argument_builder':
+                    arg = data['arguments'][0]
+                    arg['citation_draft'] = {
+                        'sentence': sentence if case != 'wrong attribution' else sentence.replace('完整系统', '单独使用 Sol-Attn'),
+                        'scope': 'B200 的 HunyuanVideo 实验',
+                        'comparison': {'baseline': '上一配置' if case == 'missing baseline' else '初始基线',
+                                       'metric': '端到端加速'},
+                        'overreach': '若归于 Sol-Attn 单项，比较起点应改为已融合和缓存的配置。',
+                        'excerpt': 'unreported outcome' if case == 'invented passage' else excerpt,
+                        'evidence_id': arg['evidence_ids'][0]}
+                if p['role'] == 'reasoning_verifier':
+                    for check in data['checks']:
+                        if check['target_type'] == 'argument':
+                            check['citation_verdict'] = 'withhold' if case == 'wrong attribution' else 'comparison'
+                response.content = json.dumps(data)
+                return response
+
+        for case in ('valid', 'missing baseline', 'invented passage', 'wrong attribution', 'abstract only'):
+            with self.subTest(case=case):
+                source = span.model_copy(update={'source_level': 'abstract'}) if case == 'abstract only' else span
+                with patch('src.research.workflow.load_evidence', return_value=[source]):
+                    output = await run_research_node()(self.task(CitationModel()))
+                report = output['research_report']
+                saved = report['core_reviews'][0]['review']['citation']
+                final = next(c for c in report['reasoning'][0]['checks'] if c['target_type'] == 'argument')['citation']
+                self.assertEqual(saved, final)
+                if case == 'valid':
+                    self.assertEqual(final['sentence'], sentence)
+                    self.assertEqual((final['page_start'], final['excerpt']), (8, excerpt))
+                    self.assertIn('可引用转述：' + sentence, output['research_markdown'])
+                    self.assertIn(final['overreach'], output['research_markdown'])
+                else:
+                    self.assertIsNone(final)
+                    self.assertNotIn('可引用转述：', output['research_markdown'])
+
     async def test_payment_rejection_stops_further_calls_and_blocks_search(self):
         class PaymentRejected(ReasoningModel):
             async def chat(self, messages, **kwargs):
