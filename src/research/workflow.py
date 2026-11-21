@@ -16,7 +16,7 @@ from .visual import prepare_visual
 from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
-from .reasoning import plan_arguments, research_questions, synthesize, render_reasoning
+from .reasoning import plan_arguments, research_questions, synthesize, render_reasoning, review_core_question, render_core_review
 from .incremental import IncrementalPlan, policy_version, dependency_manifest
 
 
@@ -71,6 +71,8 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
 
 def run_research_node():
     async def node(state):
+        started = time.monotonic()
+        core_reviews = []
         request = state["request"]
         options = ResearchOptions.from_constraints(request.constraints)
         runtime = state.get("runtime_context")
@@ -214,16 +216,30 @@ def run_research_node():
                 priority = await scope.search(request.topic, tasks)
                 largest_span = max((len(e.text) for e in evidence), default=0)
                 read_budget = min(options.context_chars, max(options.context_chars * 3 // 4, largest_span))
-                batches = [None] if revised_claims is not None else scope.batches(read_budget, [s.id for s in priority])
+                focus_pending = options.reasoning_enabled and paper_id in primary_ids and revised_claims is None
+                priority_ids = [s.id for s in priority]
+                if focus_pending:
+                    # Include an experimental result alongside the opening and retrieved passages.
+                    experimental = next((s.id for s in evidence if any(term in s.section.casefold()
+                        for term in ("result", "experiment", "evaluation", "实验", "结果"))), None)
+                    priority_ids = list(dict.fromkeys([*priority_ids[:1], *(s.id for s in evidence[:1]),
+                        *([experimental] if experimental else []), *priority_ids[1:]]))
+                batches = [None] if revised_claims is not None else scope.batches(read_budget, priority_ids)
                 for batch in batches:
                     ids = [x.id for x in batch] if batch is not None else list(scope.spans)
+                    questions = {}
                     try:
-                        claims = revised_claims if revised_claims is not None else await read_claims(tasks, request.topic, paper_id, scope, ids)
+                        claims = revised_claims if revised_claims is not None else await read_claims(tasks, request.topic, paper_id, scope, ids, core_questions=questions if focus_pending else None)
                     except (ValueError, RuntimeError, TimeoutError) as exc:
                         card.warnings.append(str(exc))
                         card.omitted_evidence_ids.extend(ids)
                         continue
+                    if questions:
+                        focus_pending = False
+                        by_id = {c.id: c for c in claims}
+                        claims = [*(by_id[cid] for cid in questions), *(c for c in claims if c.id not in questions)]
                     for claim in claims:
+                        core_question = questions.get(claim.id)
                         for previous in list(card.claims):
                             merged = merge_duplicate(previous, claim, scope)
                             if merged is not None:
@@ -238,6 +254,20 @@ def run_research_node():
                             continue
                         result = await verify(tasks, claim, scope)
                         history.append({"target": claim.model_dump(), "verification": result.model_dump()})
+                        if core_question and not tasks.terminal_error:
+                            snapshot, issues = await review_core_question(tasks, core_question, claim, result,
+                                card, evidence, policy, source_manifests)
+                            card.warnings.extend(issues)
+                            if snapshot:
+                                snapshot['elapsed_seconds'] = round(time.monotonic() - started, 3)
+                                await store.save('core_argument', render_core_review(snapshot),
+                                                 name=f"core_{version_of(claim.id)}.md",
+                                                 metadata={"question": core_question, "paper_id": paper_id})
+                                core_reviews.append(snapshot)
+                                if reporter:
+                                    reporter.progress('核心论证已完成独立审查：' + core_question,
+                                        stage='core_argument_reviewed', paper_id=paper_id,
+                                        elapsed_seconds=snapshot['elapsed_seconds'])
                         # Targeted reread preserves the failed version in the audit trail.
                         current = [(claim, result)]
                         for _ in range(options.max_repair_rounds):
@@ -298,8 +328,17 @@ def run_research_node():
                 if card.paper_id in primary_ids:
                     key = version_of({'card': card.model_dump(), 'source': source_manifests.get(card.paper_id), 'policy': policy})
                     previous_plan = next((p for p in (parent_report or {}).get('argument_plans', []) if p.get('dependency_version') == key and p.get('status') == 'planned'), None)
-                    argument_plan = dict(previous_plan) if previous_plan else await plan_arguments(tasks, request.topic, card,
-                        [e for e in all_evidence if e.paper_id == card.paper_id])
+                    current_ids = {c.id for c in card.claims}
+                    early_arguments = [s['argument'] for s in core_reviews
+                        if s['paper_id'] == card.paper_id and s['claim']['id'] in current_ids]
+                    if previous_plan:
+                        argument_plan = dict(previous_plan)
+                    elif early_arguments and {a['claim_id'] for a in early_arguments} == current_ids:
+                        argument_plan = {'paper_id': card.paper_id, 'status': 'planned',
+                                         'arguments': early_arguments, 'warnings': []}
+                    else:
+                        argument_plan = await plan_arguments(tasks, request.topic, card,
+                            [e for e in all_evidence if e.paper_id == card.paper_id])
                     argument_plan['dependency_version'] = key
                     argument_plans.append(argument_plan)
         questions = research_questions(argument_plans, cards) if options.reasoning_enabled else challenges
@@ -397,6 +436,14 @@ def run_research_node():
                 text += f"\n评分目标：{assessment['goal']}；加权分：{assessment['weighted_score']}"
             sections.append(text)
             per_paper_reasoning = [r for r in reasoning if r["paper_id"] == card.paper_id]
+            current_ids = {c.id for c in card.claims}
+            final_ids = {a['claim_id'] for r in per_paper_reasoning if r['status'] == 'reviewed'
+                         for a in r['arguments']}
+            partial = [render_core_review(s) for s in core_reviews if s['paper_id'] == card.paper_id
+                       and s['claim']['id'] in current_ids - final_ids]
+            if partial:
+                text = "\n\n".join(["# 已独立审查的核心问题", *partial, text])
+                sections[-1] = text
             await store.save("paper_report", (render_reasoning(per_paper_reasoning) + "\n\n" if per_paper_reasoning else "") + text, name=f"paper_{version_of(card.paper_id)}.md")
         if relations:
             lines = ["# 跨论文关系分析"]
@@ -525,7 +572,8 @@ def run_research_node():
             record = {k: v for k, v in revision.items() if k not in {"history", "seed_card", "evidence_versions"}}
             record["result_claims"] = [{"id": c.id, "version": c.version} for card in cards if card.paper_id == revision["target"]["paper_id"] for c in card.claims]
             revision_history = [*revision.get("history", []), record]
-        report = {"schema_version": 5, "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
+        report = {"schema_version": 5, "core_reviews": core_reviews,
+            "first_core_review_seconds": min((s["elapsed_seconds"] for s in core_reviews), default=None), "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
             "dependencies": dependency_manifest(cards, relations, paragraphs, all_evidence, source_manifests),
             "challenges": challenges, "pair_outcomes": pair_outcomes, "visual": visual_audits, "visual_model": getattr(llm, "signature", None), "output_mode": options.output_mode, "cross_paper_executed": cross_enabled,
             "assessments": assessments, "comparison_matrix": matrix, "relation_graph": relation_graph,

@@ -151,7 +151,7 @@ def research_questions(plans, cards):
     return questions
 
 
-async def synthesize(tasks, question, card, plan, evidence, external_ids, policy, *, previous=None, source_manifests=None):
+async def synthesize(tasks, question, card, plan, evidence, external_ids, policy, *, previous=None, source_manifests=None, argument_only=False):
     local = [e for e in evidence if e.paper_id == card.paper_id]
     external = [e for e in evidence if e.paper_id in external_ids]
     preferred = [eid for a in plan['arguments'] for eid in a['evidence_ids']]
@@ -168,7 +168,7 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
               'omitted_evidence_ids': [e.id for e in [*local, *external] if e.id not in supplied],
               'dependencies': {'policy': policy, 'claims': {c.id: c.version for c in card.claims},
                  'evidence': {e.id: e.version for e in selected}, 'claim_checks': version_of([v.model_dump() for v in card.verifications]),
-                 'plan': version_of(plan), 'sources': {pid: (source_manifests or {}).get(pid) for pid in {card.paper_id, *external_ids}},
+                 'plan': version_of(plan), 'argument_only': argument_only, 'sources': {pid: (source_manifests or {}).get(pid) for pid in {card.paper_id, *external_ids}},
                  'available_evidence': {e.id: e.version for e in [*local, *external]}}}
     if previous and previous.get('status') == 'reviewed' and previous.get('dependencies') == result['dependencies']:
         return {**previous, 'reused': True}
@@ -176,16 +176,19 @@ async def synthesize(tasks, question, card, plan, evidence, external_ids, policy
         result['version'] = version_of(result)
         return result
     try:
-        draft = await ask_scoped(tasks, 'research_synthesis',
-            '更新主论文的论证并提出有推导依据的insight。只使用所给原文。外部候选不是已确认佐证：'
-            '逐条记录它支持或挑战论证的哪一步及任务/指标/预算/条件可比性；摘要不能验证实验充分性。'
-            '没有可比证据时写inconclusive或different_conditions，不要凑引用。'
-            'insight区分supported_inference/hypothesis/proposal，给出推导、不确定性和区分替代解释的具体实验；'
-            '不要求凑数，不把常规摘要当insight，不把未知条件、阶段描述差异或数字舍入直接当矛盾。'
-            'argument_indices和argument_index均指向本次返回arguments的零起始索引。',
-            {'question': question, 'primary_paper_id': card.paper_id, 'arguments': plan['arguments'],
-             'claims': [c.model_dump() for c in claims.values()], 'claim_verifications': [check_summary(v, supplied) for v in card.verifications if v.target_id in claims],
-             'external_candidate_ids': sorted(external_ids), 'evidence': [e.model_dump() for e in selected]}, Synthesis, claims, supplied)
+        if argument_only:
+            draft = Synthesis(arguments=plan['arguments'])
+        else:
+            draft = await ask_scoped(tasks, 'research_synthesis',
+                '更新主论文的论证并提出有推导依据的insight。只使用所给原文。外部候选不是已确认佐证：'
+                '逐条记录它支持或挑战论证的哪一步及任务/指标/预算/条件可比性；摘要不能验证实验充分性。'
+                '没有可比证据时写inconclusive或different_conditions，不要凑引用。'
+                'insight区分supported_inference/hypothesis/proposal，给出推导、不确定性和区分替代解释的具体实验；'
+                '不要求凑数，不把常规摘要当insight，不把未知条件、阶段描述差异或数字舍入直接当矛盾。'
+                'argument_indices和argument_index均指向本次返回arguments的零起始索引。',
+                {'question': question, 'primary_paper_id': card.paper_id, 'arguments': plan['arguments'],
+                 'claims': [c.model_dump() for c in claims.values()], 'claim_verifications': [check_summary(v, supplied) for v in card.verifications if v.target_id in claims],
+                 'external_candidate_ids': sorted(external_ids), 'evidence': [e.model_dump() for e in selected]}, Synthesis, claims, supplied)
         if not draft.arguments:
             raise ValueError('综合步骤未返回论证，保留原计划待审')
         validate_arguments(draft.arguments, claims, supplied)
@@ -265,4 +268,39 @@ def render_reasoning(results):
             lines.append('未形成可交付的 insight；不强行补齐。')
         if result['omitted_evidence_ids']:
             lines.append(f"本阶段未覆盖 {len(result['omitted_evidence_ids'])} 个证据片段，完整记录见结构化产物。")
+    return '\n\n'.join(lines)
+
+
+async def review_core_question(tasks, question, claim, check, card, evidence, policy, manifests):
+    """Review a single versioned argument before processing secondary claims."""
+    focused = card.model_copy(update={'claims': [claim], 'verifications': [check]})
+    by_id = {e.id: e for e in evidence}
+    preferred = dict.fromkeys([*claim.evidence_ids, *check.counterevidence.evidence_ids,
+                               *check.experimental_support.evidence_ids, *check.evidence_ids, *by_id])
+    evidence = [by_id[eid] for eid in preferred if eid in by_id]
+    plan = await plan_arguments(tasks, question, focused, evidence)
+    plan['arguments'] = plan['arguments'][:1]
+    result = await synthesize(tasks, question, focused, plan, evidence, set(), policy,
+                              source_manifests=manifests, argument_only=True)
+    if result['status'] != 'reviewed':
+        return None, result['warnings'] or ['未形成可独立审查的核心论证']
+    citations = set(claim.evidence_ids + check.evidence_ids)
+    for entry in result['arguments'] + result['checks']:
+        citations.update(entry['evidence_ids'])
+    return {'question': question, 'paper_id': card.paper_id, 'claim': claim.model_dump(),
+            'verification': check.model_dump(), 'argument': result['arguments'][0],
+            'review': result['checks'][0],
+            'sources': [e.model_dump() for e in evidence if e.id in citations]}, []
+
+
+def render_core_review(snapshot):
+    arg, review = snapshot['argument'], snapshot['review']
+    verdict = {'supported': '有证据支持', 'qualified': '需限定或补证', 'unsupported': '证据不支持'}[review['verdict']]
+    lines = ['## ' + snapshot['question'], arg['thesis'], '原文主张核查：' + snapshot['verification']['reason'], '依据与推理：' + arg['inference'],
+             '成立条件：' + arg['conditions'], '替代解释：' + arg['alternative_explanation'],
+             '可反驳条件：' + arg['falsification'], '阶段结论：' + arg['conclusion'],
+             f"独立审查（{verdict}）：{review['reason']}"]
+    for source in snapshot['sources']:
+        location = f"第 {source['page_start']} 页 " if source['page_start'] else ''
+        lines.extend([f"**{location}{source['section']}** `{source['id']}`", source['text']])
     return '\n\n'.join(lines)

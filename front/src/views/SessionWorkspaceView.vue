@@ -147,7 +147,7 @@ const taskStatusLabel = computed(() => {
  */
 const finalArtifacts = computed(() => {
   const artifacts = timelineSnapshot.value?.artifacts ?? [];
-  return artifacts.filter((artifact) => ["final_review", "final_report", "paper_report"].includes(artifact.artifact_type));
+  return artifacts.filter((artifact) => ["final_review", "final_report", "paper_report", "core_argument"].includes(artifact.artifact_type));
 });
 
 /** 将树形事件展开成一维数组，只用于统计，不会改变时间线的显示结构。 */
@@ -646,10 +646,10 @@ function handleError(error: unknown, title: string) {
               class="insight-artifact"
             >
               <span class="insight-artifact-icon"><FileDown :size="16" /></span>
-              <span><strong>{{ artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }} · 点击打开</small></span>
+              <span><strong>{{ artifact.artifact_type === "core_argument" ? artifact.metadata?.question || "核心问题审查" : artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }} · 点击打开</small></span>
             </a>
           </template>
-          <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>任务完成后会显示阅读报告</span></div>
+          <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>已完成的阅读和审查结果会显示在这里</span></div>
         </section>
       </aside>
     </section>

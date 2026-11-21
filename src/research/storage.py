@@ -60,7 +60,7 @@ class ResearchStore:
         self.reporter = reporter
         self.artifacts = []
 
-    async def save(self, kind: str, payload, *, cache_key: str = "", name: str = ""):
+    async def save(self, kind: str, payload, *, cache_key: str = "", name: str = "", metadata: dict | None = None):
         if not self.repo or not self.session:
             return
         content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
@@ -68,7 +68,7 @@ class ResearchStore:
         identity = version_of({"kind": kind, "content": content, "turn": self.turn})
         write = asyncio.create_task(asyncio.to_thread(self.repo.write_artifact, self.session, kind, name, content,
             relative_path=f"artifacts/research/{identity}/{name}",
-            metadata={"turn_id": self.turn, "cache_key": cache_key, "schema_version": 1}))
+            metadata={**(metadata or {}), "turn_id": self.turn, "cache_key": cache_key, "schema_version": 1}))
         try:
             record = await asyncio.shield(write)
         except asyncio.CancelledError:

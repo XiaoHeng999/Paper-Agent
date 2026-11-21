@@ -174,6 +174,15 @@ class ClaimBatch(Record):
     claims: list[ClaimDraft] = Field(max_length=25)
 
 
+class CoreQuestion(Record):
+    question: str = Field(min_length=1)
+    claim_index: int = Field(ge=0)
+
+
+class FocusedClaimBatch(ClaimBatch):
+    core_questions: list[CoreQuestion] = Field(default_factory=list, max_length=2)
+
+
 class RelationDraft(Record):
     claim_ids: list[str] = Field(min_length=2, max_length=2)
     relation: Literal["equivalent", "extends", "supports", "conflicts", "different_scope", "incomparable"]

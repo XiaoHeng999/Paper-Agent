@@ -9,7 +9,7 @@ from typing import Any
 from src.llm.base import normalize_token_usage
 from .context import ScopedEvidence
 from .models import (
-    Claim, ClaimDraft, ClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
+    Claim, ClaimDraft, ClaimBatch, FocusedClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
     VerificationResult, ResearchOptions, version_of,
     ReportParagraph, ComparisonAxis, AXES,
 )
@@ -86,7 +86,7 @@ class ModelTasks:
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             # Salvage individually validated reader claims; never silently claim full coverage.
-            if schema is ClaimBatch:
+            if issubclass(schema, ClaimBatch):
                 value = json.loads(content)
                 if isinstance(value, dict) and isinstance(value.get("claims"), list) and len(value["claims"]) > 25:
                     value["claims"] = value["claims"][:25]
@@ -95,7 +95,7 @@ class ModelTasks:
             return schema.model_validate_json(content)
 
 
-async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: ScopedEvidence, evidence_ids: list[str], feedback: str = "") -> list[Claim]:
+async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: ScopedEvidence, evidence_ids: list[str], feedback: str = "", *, core_questions: dict[str, str] | None = None) -> list[Claim]:
     evidence = spans.read(evidence_ids)
     remaining = tasks.options.context_chars - sum(len(e.text) for e in evidence)
     anchors = []
@@ -106,8 +106,10 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
             anchors.append(candidate)
             remaining -= len(candidate.text)
     supplied_ids = set(evidence_ids) | {e.id for e in anchors}
-    schema = ClaimDraft if feedback else ClaimBatch
-    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。", {
+    schema = ClaimDraft if feedback else FocusedClaimBatch if core_questions is not None else ClaimBatch
+    focus = ("根据用户问题选出最多两个最影响结论、且现有证据可审查的不同问题，写入 core_questions，"
+             "用从零开始的 claim_index 关联 claims；按重要性排序。") if core_questions is not None else ""
+    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。" + focus, {
         "question": question, "paper_id": paper_id,
         "evidence": [item.model_dump() for item in evidence], "context_evidence": [item.model_dump() for item in anchors],
         "primary_evidence_ids": evidence_ids, "feedback": feedback,
@@ -128,6 +130,13 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
         value = draft.model_dump()
         version = version_of({"claim": value, "sources": [(x.id, x.version) for x in selected]})
         claims.append(Claim(**value, id=f"{paper_id}:claim:{version}", paper_id=paper_id, version=version))
+    if core_questions is not None:
+        for choice in batch.core_questions:
+            if choice.claim_index < len(claims):
+                core_questions.setdefault(claims[choice.claim_index].id, choice.question)
+        if not core_questions and claims:
+            target = next((c for c in claims if c.kind == "result"), claims[0])
+            core_questions[target.id] = question
     return claims
 
 

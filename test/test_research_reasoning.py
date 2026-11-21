@@ -11,6 +11,7 @@ from src.research.agents import ModelTasks, read_claims
 from src.research.context import ScopedEvidence
 from src.research.models import Claim, EvidenceSpan, ResearchOptions
 from src.research.visual import verification_images
+from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.research.workflow import run_research_node
 from src.research.reasoning import synthesize
 from src.research.models import PaperCard
@@ -99,6 +100,52 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         support_check = next(c for c in r['reasoning'][0]['checks'] if c['target_type']=='external_support')
         self.assertEqual(support_check['verdict'],'qualified')
         self.assertEqual(len(r['references']),2)
+
+    async def test_core_question_is_reviewed_and_saved_before_secondary_verification(self):
+        class RankedReader(ReasoningModel):
+            async def chat(model, messages, **kwargs):
+                payload = json.loads(messages[-1]['content'])
+                if payload['role'] == 'paper_reader':
+                    model.requests.append(payload)
+                    eid = payload['primary_evidence_ids'][0]
+                    return LLMResponse(content=json.dumps({
+                        'claims': [{'statement': text, 'evidence_ids': [eid]}
+                                   for text in ('次要信息', '首要结果', '适用范围')],
+                        'core_questions': [{'claim_index': 1, 'question': '实验支持主要结果吗？'},
+                                           {'claim_index': 2, 'question': '适用范围是什么？'}]}))
+                if payload['role'] == 'evidence_verifier' and payload['target']['statement'] == '次要信息':
+                    # Inspect persistent session state while the pipeline is still running.
+                    ready = [a for a in repo.get(session.key).artifacts if a['artifact_type'] == 'core_argument']
+                    self.assertEqual(len(ready), 2)
+                    model.requests.append(payload)
+                    return LLMResponse(content='', finish_reason='error', error_status_code=402)
+                return await super(RankedReader, model).chat(messages, **kwargs)
+
+        for limit, expected in [(4, 1), (40, 2)]:
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
+                repo = SQLiteSessionRepository(storage_root=directory)
+                session = repo.create()
+                model = RankedReader()
+                task = self.task(model, research_max_calls=limit, research_max_repair_rounds=0)
+                task.update(session_repo=repo, session_key=session.key, turn_id='core')
+                output = await run_research_node()(task)
+                report = output['research_report']
+                self.assertLessEqual(report['calls'], limit)
+                snapshots = report['core_reviews']
+                self.assertEqual(len(snapshots), expected)
+                first = snapshots[0]
+                self.assertEqual(first['question'], '实验支持主要结果吗？')
+                self.assertEqual(first['claim']['statement'], '首要结果')
+                self.assertEqual(first['review']['verdict'], 'qualified')
+                self.assertEqual(report['first_core_review_seconds'], first['elapsed_seconds'])
+                artifacts = [a for a in repo.get(session.key).artifacts if a['artifact_type'] == 'core_argument']
+                self.assertEqual(len(artifacts), expected)
+                saved = repo.read_artifact_path(session.key, artifacts[0]['id']).read_text()
+                self.assertIn(first['question'], saved)
+                self.assertIn(first['sources'][0]['text'], saved)
+                self.assertIn(first['question'], output['research_markdown'])
+                self.assertEqual([p['role'] for p in model.requests[:4]],
+                                 ['paper_reader', 'evidence_verifier', 'argument_builder', 'reasoning_verifier'])
 
     async def test_payment_rejection_stops_further_calls_and_blocks_search(self):
         class PaymentRejected(ReasoningModel):
