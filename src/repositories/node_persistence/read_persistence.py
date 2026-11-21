@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.models.read_models import PaperReadResult
+from src.utils.read_utils.cache import safe_cache_name
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
@@ -32,7 +33,7 @@ class ReadPersistenceSink:
     def persist_paper(self, result: PaperReadResult) -> ReadPersistenceResult:
         """在一篇论文处理结束后立刻写入笔记，防止后续失败丢失已完成结果。"""
 
-        paper_id = _safe_path_component(result.paper.id)
+        paper_id = safe_cache_name(result.paper.id)
         record = self._repo.write_artifact(
             self._session_key,
             artifact_type="paper_read_note",
@@ -63,7 +64,7 @@ class ReadPersistenceSink:
         return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
 
     def persist_checkpoint(self, checkpoint: JsonObject) -> ReadPersistenceResult:
-        """保存阅读节点的可恢复现场，供模型或 embedding 修好后继续执行。"""
+        """保存阅读节点的可恢复现场，供模型修好后继续执行。"""
 
         payload = dict(checkpoint)
         payload.setdefault("turn_id", self._turn_id)
@@ -84,11 +85,6 @@ class ReadPersistenceSink:
         return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
 
 
-def _safe_path_component(value: str) -> str:
-    """把论文编号转换成适合放进文件路径的短名称。"""
-
-    cleaned = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value)
-    return cleaned[:100] or "paper"
 
 
 def _artifact_ref(record: JsonObject) -> JsonObject:

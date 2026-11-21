@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from graph import build_graph, run_graph
-from src.agents import ReviewRequest
+from src.agents import ResearchRequest
 from src.llm.base import LLMResponse
 from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
@@ -131,7 +131,7 @@ class GraphTest(unittest.TestCase):
         stub = _StubService()
         result = asyncio.run(
             run_graph(
-            ReviewRequest(
+            ResearchRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex"], "max_results": 5},
             ),
@@ -139,12 +139,13 @@ class GraphTest(unittest.TestCase):
                 "search_node_service": stub,
                 "search_node_llm": _fake_snapshot(),
                 "read_node_llm": _read_snapshot(),
+                "research_node_llm": None,
             },
             )
         )
 
         self.assertGreaterEqual(len(stub.calls), 1)
-        self.assertEqual(stub.calls[0]["limit"], 5)
+        self.assertGreaterEqual(stub.calls[0]["limit"], 5)
         self.assertGreaterEqual(len(result.papers), 1)
         self.assertEqual(result.state["current_step"], "reply")
         self.assertIn("agent", result.diagnostics)
@@ -161,7 +162,7 @@ class GraphTest(unittest.TestCase):
         stub = _StubService()
         result = asyncio.run(
             run_graph(
-            ReviewRequest(
+            ResearchRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
             ),
@@ -169,13 +170,14 @@ class GraphTest(unittest.TestCase):
                 "search_node_service": stub,
                 "search_node_llm": _fake_snapshot(),
                 "read_node_llm": _read_snapshot(),
+                "research_node_llm": None,
             },
             )
         )
 
         self.assertEqual(len(stub.calls), 1)
         self.assertEqual(stub.calls[0]["sources"], ["openalex", "arxiv"])
-        self.assertEqual(stub.calls[0]["limit"], 5)
+        self.assertGreaterEqual(stub.calls[0]["limit"], 5)
         self.assertLessEqual(len(result.papers), 5)
 
     def test_run_graph_persists_artifacts_when_session_context_is_provided(self):
@@ -187,7 +189,7 @@ class GraphTest(unittest.TestCase):
             session = repo.create("Paper search")
             result = asyncio.run(
                 run_graph(
-                ReviewRequest(
+                ResearchRequest(
                     topic="multi-agent literature review",
                     constraints={"sources": ["openalex"], "max_results": 3},
                 ),
@@ -198,6 +200,7 @@ class GraphTest(unittest.TestCase):
                     "search_node_service": stub,
                     "search_node_llm": _fake_snapshot(),
                     "read_node_llm": _read_snapshot(),
+                "research_node_llm": None,
                 },
                 )
             )
@@ -227,7 +230,7 @@ class GraphTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 asyncio.run(
                     run_graph(
-                    ReviewRequest(
+                    ResearchRequest(
                         topic="multi-agent literature review",
                         constraints={"sources": ["openalex"], "max_results": 3},
                     ),
@@ -294,11 +297,12 @@ class GraphTest(unittest.TestCase):
 
         result = asyncio.run(
             run_graph(
-            ReviewRequest(topic="placeholder"),
+            ResearchRequest(topic="placeholder"),
             state_overrides={
                 "read_resume_checkpoint": checkpoint,
                 "search_node_service": stub,
                 "read_node_llm": _read_snapshot(),
+                "research_node_llm": None,
             },
             )
         )

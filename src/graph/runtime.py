@@ -71,7 +71,7 @@ class WorkflowRuntimeContext:
     # 节点可以在开始新阶段前检查它，后台服务也可以用它配合取消当前任务。
     cancellation: WorkflowCancellation | None = None
     # 中文注释：resources 里放的是单次 run 共用的并发控制对象和公共资源，
-    # 例如下载限流、共用 AsyncClient、embedding 连接等。节点通过 runtime_context
+    # 例如下载限流、共用 AsyncClient等。节点通过 runtime_context
     # 就能拿到这些资源，不需要再往 State 顶层散落很多字段。
     resources: WorkflowRuntimeResources | None = None
 
@@ -171,7 +171,6 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("read", "reading_abstract"): RuntimeStageDisplay("reading_abstract", "阅读论文摘要"),
     ("read", "downloading_full_text"): RuntimeStageDisplay("downloading_full_text", "下载论文全文"),
     ("read", "converting_markdown"): RuntimeStageDisplay("converting_markdown", "转换 Markdown"),
-    ("read", "verifying_full_text"): RuntimeStageDisplay("verifying_full_text", "核实论文提取结果"),
     ("read", "saving_chunks"): RuntimeStageDisplay("saving_chunks", "建立全文索引"),
     ("read", "paper_completed"): RuntimeStageDisplay(
         "paper_completed",
@@ -202,11 +201,6 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         "等待阅读模型恢复",
         status="failed",
     ),
-    ("read", "read_embedding_unavailable"): RuntimeStageDisplay(
-        "read_embedding_unavailable",
-        "等待向量服务恢复",
-        status="failed",
-    ),
     ("read", "read_done"): RuntimeStageDisplay(
         "read",
         "论文阅读",
@@ -214,60 +208,6 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         status="completed",
         updates_parent=True,
     ),
-    ("analyse", "analyse_start"): RuntimeStageDisplay("analyse", "论文分析", updates_parent=True),
-    ("analyse", "analyse_subtopic"): RuntimeStageDisplay("analyse_subtopic", "分析子主题"),
-    ("analyse", "analyse_overall"): RuntimeStageDisplay("analyse_overall", "综合子主题"),
-    ("analyse", "analysis_artifact_ready"): RuntimeStageDisplay(
-        "analysis_artifact_ready",
-        "保存分析报告",
-        show_content="分析报告已保存",
-        status="completed",
-    ),
-    ("analyse", "analyse_done"): RuntimeStageDisplay(
-        "analyse",
-        "论文分析",
-        show_content="论文分析已完成",
-        status="completed",
-        updates_parent=True,
-    ),
-    # 中文说明：写作大纲开始和结束时都直接更新“写作大纲”这一张主卡片，
-    # 这样开始事件不会单独留下一个一直显示“处理中”的旧步骤。
-    ("write_outline", "writing_outline_start"): RuntimeStageDisplay(
-        "write_outline",
-        "写作大纲",
-        updates_parent=True,
-    ),
-    # 中文说明：模型用量回调也属于写作大纲主阶段，直接更新主卡片，
-    # 避免额外生成一张一直停留在“处理中”的 writing outline 子卡片。
-    ("write_outline", "writing_outline"): RuntimeStageDisplay(
-        "write_outline",
-        "写作大纲",
-        updates_parent=True,
-    ),
-    # 中文说明：保存出来的 JSON 产物仍然单独显示，用户可以知道文件已经保存成功。
-    ("write_outline", "writing_outline_artifact_ready"): RuntimeStageDisplay(
-        "writing_outline_artifact_ready",
-        "保存写作大纲",
-        show_content="写作大纲产物已保存",
-        status="completed",
-    ),
-    # 中文说明：结束事件继续更新同一张主卡片，并把它的状态改成已完成。
-    ("write_outline", "writing_outline_done"): RuntimeStageDisplay(
-        "write_outline",
-        "写作大纲",
-        show_content="写作大纲已完成",
-        status="completed",
-        updates_parent=True,
-    ),
-    # 中文说明：正文开始时只更新“正文写作”主卡，不再额外显示 writing start 子卡。
-    ("write", "writing_start"): RuntimeStageDisplay(
-        "write",
-        "正文写作",
-        updates_parent=True,
-    ),
-    # 中文说明：摘要和参考文献各自只保留一张卡，后续用同一个事件键更新处理状态。
-    ("write", "writing_abstract"): RuntimeStageDisplay("writing_abstract", "摘要写作"),
-    ("write", "writing_references"): RuntimeStageDisplay("writing_references", "参考文献生成"),
     ("compose_reply", "compose_start"): RuntimeStageDisplay("compose_reply", "回复整理", updates_parent=True),
     ("compose_reply", "compose_reply"): RuntimeStageDisplay("compose_reply_step", "生成最终回复"),
     ("compose_reply", "final_artifact_ready"): RuntimeStageDisplay(

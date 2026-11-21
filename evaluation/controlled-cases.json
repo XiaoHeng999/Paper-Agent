@@ -1,0 +1,584 @@
+{
+  "schema_version": 1,
+  "provenance": "Synthetic controlled cases. Never report as real-paper or expert validation.",
+  "sources": [
+    {
+      "id": "fixture:supports:left:e",
+      "paper_id": "fixture:supports:left",
+      "title": "fixture:supports:left",
+      "url": "fixture://controlled/fixture:supports:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:supports:right:e",
+      "paper_id": "fixture:supports:right",
+      "title": "fixture:supports:right",
+      "url": "fixture://controlled/fixture:supports:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:conflicts:left:e",
+      "paper_id": "fixture:conflicts:left",
+      "title": "fixture:conflicts:left",
+      "url": "fixture://controlled/fixture:conflicts:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:conflicts:right:e",
+      "paper_id": "fixture:conflicts:right",
+      "title": "fixture:conflicts:right",
+      "url": "fixture://controlled/fixture:conflicts:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A reduces accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:equivalent:left:e",
+      "paper_id": "fixture:equivalent:left",
+      "title": "fixture:equivalent:left",
+      "url": "fixture://controlled/fixture:equivalent:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. Method A uses a fixed linear transform followed by a normalization step. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:equivalent:right:e",
+      "paper_id": "fixture:equivalent:right",
+      "title": "fixture:equivalent:right",
+      "url": "fixture://controlled/fixture:equivalent:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. Method A uses a fixed linear transform followed by a normalization step. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:extends:left:e",
+      "paper_id": "fixture:extends:left",
+      "title": "fixture:extends:left",
+      "url": "fixture://controlled/fixture:extends:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. This extends method A by adding adaptive normalization; fixed normalization is recovered when alpha=0. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A plus adaptive normalization\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:extends:right:e",
+      "paper_id": "fixture:extends:right",
+      "title": "fixture:extends:right",
+      "url": "fixture://controlled/fixture:extends:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. Method A uses a fixed linear transform followed by a normalization step. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:different_scope:left:e",
+      "paper_id": "fixture:different_scope:left",
+      "title": "fixture:different_scope:left",
+      "url": "fixture://controlled/fixture:different_scope:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:different_scope:right:e",
+      "paper_id": "fixture:different_scope:right",
+      "title": "fixture:different_scope:right",
+      "url": "fixture://controlled/fixture:different_scope:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"1000 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:incomparable:left:e",
+      "paper_id": "fixture:incomparable:left",
+      "title": "fixture:incomparable:left",
+      "url": "fixture://controlled/fixture:incomparable:left",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"Does intervention A improve accuracy on D?\", \"mechanism\": \"A\", \"task\": \"classification\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"accuracy\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:incomparable:right:e",
+      "paper_id": "fixture:incomparable:right",
+      "title": "fixture:incomparable:right",
+      "url": "fixture://controlled/fixture:incomparable:right",
+      "locator": "Controlled experimental record",
+      "text": "Controlled synthetic specification, not a real paper. A improves accuracy versus B under the specified conditions. Conditions: {\"problem\": \"How to compress images?\", \"mechanism\": \"A\", \"task\": \"compression\", \"dataset\": \"D\", \"baseline\": \"B\", \"metric\": \"bits per pixel\", \"budget\": \"100 updates\", \"sample_size\": \"1000\", \"ablation\": \"controlled A versus B\", \"negative_results\": \"reported\", \"implementation\": \"fixed seeds\"}. Experiments compare both groups over five seeds, with non-overlapping confidence intervals. All other settings are held equal.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:experiment:supported:e",
+      "paper_id": "fixture:experiment:supported",
+      "title": "fixture:experiment:supported",
+      "url": "fixture://controlled/fixture:experiment:supported",
+      "locator": "Experimental record",
+      "text": "A and B differ only in intervention. Ten randomized independent replications show A improves accuracy by 10 points, 95% CI [8,12]. No other condition changes.",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:experiment:contradicted:e",
+      "paper_id": "fixture:experiment:contradicted",
+      "title": "fixture:experiment:contradicted",
+      "url": "fixture://controlled/fixture:experiment:contradicted",
+      "locator": "Experimental record",
+      "text": "A and B differ only in intervention. Ten randomized independent replications show A reduces accuracy by 10 points, 95% CI [-12,-8].",
+      "level": "full_text",
+      "origin": "controlled_fixture"
+    },
+    {
+      "id": "fixture:experiment:unknown:e",
+      "paper_id": "fixture:experiment:unknown",
+      "title": "fixture:experiment:unknown",
+      "url": "fixture://controlled/fixture:experiment:unknown",
+      "locator": "Experimental record",
+      "text": "Only an abstract claims an improvement. It gives no baseline, sample size or controlled experiment.",
+      "level": "abstract",
+      "origin": "controlled_fixture"
+    }
+  ],
+  "cases": [
+    {
+      "id": "relation-supports",
+      "split": "development",
+      "source_ids": [
+        "fixture:supports:left:e",
+        "fixture:supports:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:supports:left",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:supports:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:supports:right",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:supports:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "supports"
+      },
+      "rationale": "Explicitly constructed control for supports",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "relation-conflicts",
+      "split": "development",
+      "source_ids": [
+        "fixture:conflicts:left:e",
+        "fixture:conflicts:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:conflicts:left",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:conflicts:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:conflicts:right",
+          "statement": "A reduces accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:conflicts:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "conflicts"
+      },
+      "rationale": "Explicitly constructed control for conflicts",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "relation-equivalent",
+      "split": "development",
+      "source_ids": [
+        "fixture:equivalent:left:e",
+        "fixture:equivalent:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:equivalent:left",
+          "statement": "Method A uses a fixed linear transform followed by a normalization step.",
+          "kind": "method",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:equivalent:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:equivalent:right",
+          "statement": "Method A uses a fixed linear transform followed by a normalization step.",
+          "kind": "method",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:equivalent:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "equivalent"
+      },
+      "rationale": "Explicitly constructed control for equivalent",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "relation-extends",
+      "split": "development",
+      "source_ids": [
+        "fixture:extends:left:e",
+        "fixture:extends:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:extends:left",
+          "statement": "This extends method A by adding adaptive normalization; fixed normalization is recovered when alpha=0.",
+          "kind": "method",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A plus adaptive normalization",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:extends:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:extends:right",
+          "statement": "Method A uses a fixed linear transform followed by a normalization step.",
+          "kind": "method",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:extends:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "extends"
+      },
+      "rationale": "Explicitly constructed control for extends",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "relation-different_scope",
+      "split": "development",
+      "source_ids": [
+        "fixture:different_scope:left:e",
+        "fixture:different_scope:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:different_scope:left",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:different_scope:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:different_scope:right",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "1000 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:different_scope:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "different_scope"
+      },
+      "rationale": "Explicitly constructed control for different_scope",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "relation-incomparable",
+      "split": "development",
+      "source_ids": [
+        "fixture:incomparable:left:e",
+        "fixture:incomparable:right:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:incomparable:left",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "Does intervention A improve accuracy on D?",
+            "mechanism": "A",
+            "task": "classification",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "accuracy",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:incomparable:left:e"
+          ]
+        },
+        {
+          "paper_id": "fixture:incomparable:right",
+          "statement": "A improves accuracy versus B under the specified conditions.",
+          "kind": "result",
+          "conditions": "specified setting",
+          "study": {
+            "problem": "How to compress images?",
+            "mechanism": "A",
+            "task": "compression",
+            "dataset": "D",
+            "baseline": "B",
+            "metric": "bits per pixel",
+            "budget": "100 updates",
+            "sample_size": "1000",
+            "ablation": "controlled A versus B",
+            "negative_results": "reported",
+            "implementation": "fixed seeds"
+          },
+          "evidence_ids": [
+            "fixture:incomparable:right:e"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "incomparable"
+      },
+      "rationale": "Explicitly constructed control for incomparable",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "experiment-supported",
+      "split": "development",
+      "source_ids": [
+        "fixture:experiment:supported:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:experiment:supported",
+          "statement": "A improves accuracy over B in the reported experiment.",
+          "kind": "result",
+          "conditions": "only this controlled experiment",
+          "attribution": "system_inference",
+          "evidence_ids": [
+            "fixture:experiment:supported:e"
+          ]
+        }
+      ],
+      "reference": {
+        "experimental_support": "supported"
+      },
+      "rationale": "Evaluate support versus contradiction versus insufficient evidence, without claiming external replication.",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "experiment-contradicted",
+      "split": "development",
+      "source_ids": [
+        "fixture:experiment:contradicted:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:experiment:contradicted",
+          "statement": "A improves accuracy over B in the reported experiment.",
+          "kind": "result",
+          "conditions": "only this controlled experiment",
+          "attribution": "system_inference",
+          "evidence_ids": [
+            "fixture:experiment:contradicted:e"
+          ]
+        }
+      ],
+      "reference": {
+        "experimental_support": "contradicted"
+      },
+      "rationale": "Evaluate support versus contradiction versus insufficient evidence, without claiming external replication.",
+      "annotation_status": "controlled_fixture"
+    },
+    {
+      "id": "experiment-unknown",
+      "split": "development",
+      "source_ids": [
+        "fixture:experiment:unknown:e"
+      ],
+      "claims": [
+        {
+          "paper_id": "fixture:experiment:unknown",
+          "statement": "A improves accuracy over B in the reported experiment.",
+          "kind": "result",
+          "conditions": "only this controlled experiment",
+          "attribution": "system_inference",
+          "evidence_ids": [
+            "fixture:experiment:unknown:e"
+          ]
+        }
+      ],
+      "reference": {
+        "experimental_support": "unknown"
+      },
+      "rationale": "Evaluate support versus contradiction versus insufficient evidence, without claiming external replication.",
+      "annotation_status": "controlled_fixture"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 
@@ -6,8 +7,7 @@ from src.llm import ModelConfig, StreamCallbacks, SystemConfig, make_provider
 
 
 def _live_test_enabled() -> bool:
-    return True
-    # return os.getenv("RUN_LIVE_MODEL_TEST") == "1"
+    return os.getenv("RUN_LIVE_MODEL_TEST") == "1"
 
 
 @unittest.skipUnless(_live_test_enabled(), "set RUN_LIVE_MODEL_TEST=1 to run live model integration tests")

@@ -78,6 +78,14 @@ export interface SessionRunAccepted {
 
 /** 用户可以在提交主题时附带的检索和阅读限制。空字段不会写入请求。 */
 export interface SessionConstraints {
+  output_mode?: "paper_cards" | "paper_report" | "comparison" | "review";
+  cross_paper_enabled?: boolean;
+  visual_verification?: boolean;
+  visual_page_limit?: number;
+  allow_external_search?: boolean;
+  external_paper_limit?: number;
+  scoring_goal?: string;
+  score_weights?: Record<string, number>;
   year_from?: number;
   year_to?: number;
   max_results?: number;

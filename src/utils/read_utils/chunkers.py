@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
+import os
+import tempfile
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -108,7 +111,7 @@ class PageChunker(BaseChunker):
                             content=page_chunk,
                             page_start=page_number,
                             page_end=page_number,
-                            section=f"page_{page_number}" if page_number is not None else "姝ｆ枃",
+                            section=f"page_{page_number}" if page_number is not None else "正文",
                             metadata={"chunker": self.name},
                         )
                     )
@@ -140,25 +143,38 @@ def build_chunks_file(
     """读取 Markdown，清理非正文内容后切分，并写入 chunk.json。
 
     中文注释：这个文件是后续全文提取和向量化共同使用的“同一份上下文”。这样
-    extraction.json 里引用的 chunkId，和向量库里的 chunkId 可以保持一致。
+    判断卡引用的 chunkId 与持久化原文片段保持一致。
     """
 
     output_path = chunks_path or markdown_path.parent / "chunk.json"
-    cached = load_chunks_file(output_path)
-    if cached and all(len(chunk.content) <= PageChunker.max_chunk_characters for chunk in cached):
-        return ChunkBuildResult(chunks_path=output_path, chunks=cached)
     markdown = markdown_path.read_text(encoding="utf-8")
     resolved_chunker = chunker or PageChunker()
-    # 中文注释：PDF 转换出的 Markdown 往往混有每页重复的页眉、页脚、摘要和参考文献。
-    # 这些内容会干扰模型判断，所以切分前先只留下论文正文。
+    fingerprint = chunk_source_version(paper, markdown, resolved_chunker)
+    if chunks_are_current(paper, markdown_path, output_path, resolved_chunker):
+        return ChunkBuildResult(chunks_path=output_path, chunks=load_chunks_file(output_path))
     body_markdown = preprocess_markdown_body(markdown)
     chunks = resolved_chunker.chunk(paper, body_markdown)
     payload = {
         "paperId": paper.paperId or paper.id,
         "chunker": resolved_chunker.name,
+        "source_version": fingerprint,
         "chunks": [chunk.to_dict() for chunk in chunks],
     }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Replace atomically so concurrent readers never see half a JSON document.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return ChunkBuildResult(chunks_path=output_path, chunks=chunks)
 
 
@@ -216,134 +232,41 @@ def load_chunks_file(chunks_path: Path) -> list[TextChunk]:
             TextChunk(
                 chunk_id=chunk_id,
                 paperId=str(item.get("paperId") or item.get("paper_id") or ""),
-                chunk_index=int(item.get("chunk_index") or len(chunks)),
+                chunk_index=_optional_int(item.get("chunk_index")) if _optional_int(item.get("chunk_index")) is not None else len(chunks),
                 content=content,
                 page_start=_optional_int(item.get("page_start")),
                 page_end=_optional_int(item.get("page_end")),
                 section=str(item.get("section") or ""),
                 previous_chunk_id=_optional_text(item.get("previous_chunk_id")),
                 next_chunk_id=_optional_text(item.get("next_chunk_id")),
-                metadata=dict(item.get("metadata") or {}),
+                metadata=dict(item["metadata"]) if isinstance(item.get("metadata"), dict) else {},
             )
         )
     return chunks
 
 
+def chunk_source_version(paper, markdown, chunker=None):
+    chunker = chunker or PageChunker()
+    value = {"policy": "preserve-source-v2", "paper_id": paper.paperId or paper.id,
+             "markdown": markdown, "chunker": chunker.name,
+             "max_chars": getattr(chunker, "max_chunk_characters", None)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def chunks_are_current(paper, markdown_path, chunks_path=None, chunker=None):
+    path = chunks_path or markdown_path.parent / "chunk.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        markdown = markdown_path.read_text(encoding="utf-8")
+        return (isinstance(payload, dict) and payload.get("source_version") == chunk_source_version(paper, markdown, chunker)
+                and bool(load_chunks_file(path)))
+    except (OSError, ValueError):
+        return False
+
+
 def preprocess_markdown_body(markdown: str) -> str:
-    """删除页眉页脚、摘要和参考文献，只保留用于精读的正文。"""
-
-    pages = _split_by_page_marker(markdown)
-    if pages:
-        # 中文注释：同一段文字反复出现在多页首尾时，通常就是页眉或页脚。
-        # 先按页去掉这些重复文字，再拼回页码标记，后面的切分仍能保留页码信息。
-        page_contents = _remove_repeated_page_margins([str(page.get("content") or "") for page in pages])
-        body = "\n\n".join(
-            f"<!-- page: {page['page']} -->\n{content.strip()}"
-            for page, content in zip(pages, page_contents, strict=True)
-            if content.strip()
-        )
-    else:
-        body = _remove_front_matter(markdown)
-    return _remove_abstract_and_references(body).strip()
-
-
-def _remove_repeated_page_margins(page_contents: list[str]) -> list[str]:
-    """识别多页中重复出现的首尾文字，并将它们从对应页面删除。"""
-
-    if len(page_contents) < 2:
-        return page_contents
-
-    header_pages: dict[str, set[int]] = {}
-    footer_pages: dict[str, set[int]] = {}
-    for page_index, content in enumerate(page_contents):
-        lines = _meaningful_lines(content)
-        if not lines:
-            continue
-        header_key = _page_margin_key(lines[0])
-        footer_key = _page_margin_key(lines[-1])
-        if header_key:
-            header_pages.setdefault(header_key, set()).add(page_index)
-        if footer_key:
-            footer_pages.setdefault(footer_key, set()).add(page_index)
-
-    # 中文注释：至少出现在两页、且覆盖半数页面的首尾文字才删除，避免误删正文标题。
-    minimum_pages = max(2, (len(page_contents) + 1) // 2)
-    repeated_headers = {key for key, pages in header_pages.items() if len(pages) >= minimum_pages}
-    repeated_footers = {key for key, pages in footer_pages.items() if len(pages) >= minimum_pages}
-    cleaned_pages: list[str] = []
-    for content in page_contents:
-        lines = content.splitlines()
-        meaningful_indexes = [index for index, line in enumerate(lines) if line.strip()]
-        if meaningful_indexes and _page_margin_key(lines[meaningful_indexes[0]]) in repeated_headers:
-            lines[meaningful_indexes[0]] = ""
-        if meaningful_indexes and _page_margin_key(lines[meaningful_indexes[-1]]) in repeated_footers:
-            lines[meaningful_indexes[-1]] = ""
-        cleaned_pages.append("\n".join(lines).strip())
-    return cleaned_pages
-
-
-def _meaningful_lines(content: str) -> list[str]:
-    """返回页面中非空的文字行，供页眉页脚判断使用。"""
-
-    return [line.strip() for line in content.splitlines() if line.strip()]
-
-
-def _page_margin_key(line: str) -> str:
-    """把页码中的数字统一替换，识别“第 1 页”和“第 2 页”这类重复页脚。"""
-
-    normalized = re.sub(r"\d+", "#", line.lower())
-    normalized = re.sub(r"\s+", "", normalized)
-    return normalized if 3 <= len(normalized) <= 160 else ""
-
-
-def _remove_abstract_and_references(markdown: str) -> str:
-    """删除摘要到引言之间的内容，并删除参考文献及其后的内容。"""
-
-    lines = markdown.splitlines()
-    reference_index = next((index for index, line in enumerate(lines) if _is_references_heading(line)), len(lines))
-    body_lines = lines[:reference_index]
-    abstract_index = next((index for index, line in enumerate(body_lines) if _is_abstract_heading(line)), None)
-    if abstract_index is None:
-        return "\n".join(body_lines)
-
-    # 中文注释：只有找到引言这类正文起点才删除摘要，避免解析异常时误删后续正文。
-    body_start = next(
-        (index for index in range(abstract_index + 1, len(body_lines)) if _is_body_start_heading(body_lines[index])),
-        None,
-    )
-    if body_start is None:
-        return "\n".join(body_lines)
-    return "\n".join(body_lines[:abstract_index] + body_lines[body_start:])
-
-
-def _is_abstract_heading(line: str) -> bool:
-    """判断一行是否是摘要标题，兼容英文和中文的常见写法。"""
-
-    return bool(re.match(r"^\s*(?:#{1,6}\s*)?(?:abstract|摘要)\b[\s:：.\-—]*.*$", line, flags=re.IGNORECASE))
-
-
-def _is_body_start_heading(line: str) -> bool:
-    """判断一行是否标志着摘要结束后的正文开始。"""
-
-    return bool(
-        re.match(
-            r"^\s*(?:#{1,6}\s*)?(?:(?:\d+|[ivxlcdm]+)[.)、]?\s*)?(?:introduction|引言)\b.*$",
-            line,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
-def _is_references_heading(line: str) -> bool:
-    """判断一行是否是参考文献标题，命中后该行及后续内容都不参与精读。"""
-
-    return bool(
-        re.match(
-            r"^\s*(?:#{1,6}\s*)?(?:(?:\d+|[ivxlcdm]+)[.)、]?\s*)?(?:references?|bibliography|参考文献)\s*$",
-            line,
-            flags=re.IGNORECASE,
-        )
-    )
+    """仅去除文件元数据；摘要、重复行、参考文献和附录均是可回查来源。"""
+    return _remove_front_matter(markdown)
 
 
 def _split_by_page_marker(markdown: str) -> list[JsonObject]:
@@ -355,6 +278,9 @@ def _split_by_page_marker(markdown: str) -> list[JsonObject]:
     if not matches:
         return []
     parts: list[JsonObject] = []
+    prefix = text[:matches[0].start()].strip()
+    if prefix:
+        parts.append({"page": None, "content": prefix})
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
@@ -384,7 +310,7 @@ def _optional_int(value: Any) -> int | None:
     """把可能为空的页码转成整数。"""
 
     try:
-        return int(value) if value not in {None, ""} else None
+        return int(value) if value is not None and value != "" else None
     except (TypeError, ValueError):
         return None
 

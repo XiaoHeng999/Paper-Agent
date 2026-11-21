@@ -6,17 +6,16 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from src.agents.contracts import ReviewRequest
-from src.graph.analyse_node import run_analyse_node
+from src.agents.contracts import ResearchRequest
 from src.graph.reply_node import run_compose_reply_node
 from src.graph.read_node import run_read_node
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
 from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
-from src.graph.writing_outline_node import run_writing_outline_node
-from src.graph.writing_node import run_writing_node
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
+from src.research.models import ResearchOptions, validate_checkpoint_options
+from src.research.workflow import run_research_node
 
 
 @dataclass(slots=True)
@@ -34,7 +33,10 @@ GraphState = State
 def _entrypoint(state: State) -> str:
     """根据是否带阅读恢复现场决定从检索还是阅读节点开始。"""
 
-    return "run_read" if isinstance(state.get("read_resume_checkpoint"), dict) else "run_search_agent"
+    checkpoint = state.get("read_resume_checkpoint")
+    if isinstance(checkpoint, dict) and checkpoint.get("phase") == "research":
+        return "run_research"
+    return "run_read" if isinstance(checkpoint, dict) or state.get("supplied_papers") else "run_search_agent"
 
 
 def build_graph():
@@ -43,16 +45,12 @@ def build_graph():
     workflow = StateGraph(State)
     workflow.add_node("run_search_agent", _with_cancellation_boundary("run_search_agent", run_search_agent_node()))
     workflow.add_node("run_read", _with_cancellation_boundary("run_read", run_read_node()))
-    workflow.add_node("run_analyse", _with_cancellation_boundary("run_analyse", run_analyse_node()))
-    workflow.add_node("run_writing_outline", _with_cancellation_boundary("run_writing_outline", run_writing_outline_node()))
-    workflow.add_node("run_writing", _with_cancellation_boundary("run_writing", run_writing_node()))
+    workflow.add_node("run_research", _with_cancellation_boundary("run_research", run_research_node()))
     workflow.add_node("compose_reply", _with_cancellation_boundary("compose_reply", run_compose_reply_node()))
-    workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
+    workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read", "run_research": "run_research"})
     workflow.add_edge("run_search_agent", "run_read")
-    workflow.add_edge("run_read", "run_analyse")
-    workflow.add_edge("run_analyse", "run_writing_outline")
-    workflow.add_edge("run_writing_outline", "run_writing")
-    workflow.add_edge("run_writing", "compose_reply")
+    workflow.add_edge("run_read", "run_research")
+    workflow.add_edge("run_research", "compose_reply")
     workflow.add_edge("compose_reply", END)
     return workflow.compile(name="paper_graph")
 
@@ -81,7 +79,7 @@ def _with_cancellation_boundary(node_name: str, node):
 
 
 async def run_graph(
-    request: ReviewRequest,
+    request: ResearchRequest,
     *,
     runtime: WorkflowRuntimeContext | None = None,
     session_repo: SessionRepository | None = None,
@@ -91,6 +89,7 @@ async def run_graph(
 ) -> GraphRunResult:
     """异步运行执行图，并把运行上下文一并注入共享状态。"""
 
+    ResearchOptions.from_constraints(request.constraints)
     graph = build_graph()
     initial_state = _build_initial_state(
         request,
@@ -111,7 +110,7 @@ async def run_graph(
 
 
 def run_graph_sync(
-    request: ReviewRequest,
+    request: ResearchRequest,
     *,
     runtime: WorkflowRuntimeContext | None = None,
     session_repo: SessionRepository | None = None,
@@ -135,7 +134,7 @@ def run_graph_sync(
 
 
 def _build_initial_state(
-    request: ReviewRequest,
+    request: ResearchRequest,
     *,
     runtime: WorkflowRuntimeContext | None,
     session_repo: SessionRepository | None,
@@ -148,22 +147,12 @@ def _build_initial_state(
     initial_state = State(
         request=request,
         search_results=[],
-        # DEPRECATED: 2026-08-22 随关键词打分下线，初始状态不再准备打分明细字段。
-        # search_scores=[],
         search_summary={},
         search_output={},
         search_artifact_refs=[],
         read_results=[],
         read_summary={},
         read_artifact_refs=[],
-        analysis_report={},
-        analysis_artifact_refs=[],
-        writing_outline={},
-        writing_outline_report={},
-        writing_outline_artifact_refs=[],
-        writing_sections=[],
-        writing_report={},
-        writing_artifact_refs=[],
         final_artifact_refs=[],
         diagnostics={},
         current_step="init",
@@ -196,6 +185,15 @@ def _build_initial_state(
         initial_state["runtime_context"] = runtime
     if state_overrides:
         initial_state.update(state_overrides)
+    supplied = request.constraints.get("papers")
+    if supplied is not None:
+        if not isinstance(supplied, list) or not supplied or len(supplied) > 200:
+            raise ValueError("papers 必须包含 1 到 200 篇论文")
+        papers = _papers_from_checkpoint(supplied)
+        if len(papers) != len(supplied):
+            raise ValueError("每篇指定论文必须包含 id 和 title")
+        initial_state["search_results"] = papers
+        initial_state["supplied_papers"] = True
     return _merge_read_checkpoint(initial_state)
 
 
@@ -205,9 +203,10 @@ def _merge_read_checkpoint(state: State) -> State:
     checkpoint = state.get("read_resume_checkpoint")
     if not isinstance(checkpoint, dict):
         return state
+    validate_checkpoint_options(checkpoint, state["request"].constraints)
     request_payload = checkpoint.get("request")
     if isinstance(request_payload, dict) and str(request_payload.get("topic") or "").strip():
-        state["request"] = ReviewRequest(
+        state["request"] = ResearchRequest(
             topic=str(request_payload.get("topic") or ""),
             constraints=dict(request_payload.get("constraints") or {}),
             language=str(request_payload.get("language") or "zh"),
@@ -219,8 +218,6 @@ def _merge_read_checkpoint(state: State) -> State:
         state["read_results"] = list(checkpoint.get("read_results") or [])
     if checkpoint.get("read_artifact_refs") and not state.get("read_artifact_refs"):
         state["read_artifact_refs"] = list(checkpoint.get("read_artifact_refs") or [])
-    # 中文注释：旧 checkpoint 只有阅读模型恢复一种情况，所以这里以前固定写成
-    # read_waiting_model。现在 embedding 也可能等待恢复，优先使用 checkpoint 自带步骤。
     state["current_step"] = str(checkpoint.get("current_step") or "read_waiting_model")
     return state
 

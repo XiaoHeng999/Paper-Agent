@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents import ReviewRequest
+from src.agents import ResearchRequest
 from src.graph import run_graph
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.repositories.sessions.base import SessionRepository
@@ -40,8 +40,8 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
 
         checkpoint = frame.get("read_resume_checkpoint")
         # 中文注释：新请求的约束由前端放在请求体的 constraints 字段中，
-        # 这里把它装进 ReviewRequest，后续图状态就会通过 state["request"].constraints 使用。
-        request = _request_from_checkpoint(checkpoint) or ReviewRequest(
+        # 这里把它装进 ResearchRequest，后续图状态就会通过 state["request"].constraints 使用。
+        request = _request_from_checkpoint(checkpoint) or ResearchRequest(
             topic=content,
             constraints=_constraints_from_frame(frame),
         )
@@ -65,7 +65,7 @@ def _constraints_from_frame(frame: JsonObject) -> JsonObject:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _request_from_checkpoint(checkpoint: Any) -> ReviewRequest | None:
+def _request_from_checkpoint(checkpoint: Any) -> ResearchRequest | None:
     """恢复执行时优先沿用 checkpoint 里的原始请求。"""
 
     if not isinstance(checkpoint, dict):
@@ -76,7 +76,7 @@ def _request_from_checkpoint(checkpoint: Any) -> ReviewRequest | None:
     topic = str(payload.get("topic") or "").strip()
     if not topic:
         return None
-    return ReviewRequest(
+    return ResearchRequest(
         topic=topic,
         constraints=dict(payload.get("constraints") or {}),
         language=str(payload.get("language") or "zh"),

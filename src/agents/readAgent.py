@@ -10,11 +10,6 @@ from typing import Any
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 from src.llm.base import LLMResponse
-# DEPRECATED: 2026-09-07
-# 原因：三维等级 + 评分表退役，相关性判断改为模型直接输出二元 {relevant, reason}。
-# 替代方案：不再需要 normalize_match_levels。
-# 计划移除：阅读阶段持续过滤机制稳定运行一段时间后清理
-# from src.models.read_models import ReadNote, ReadRelevance, normalize_match_levels
 from src.models.read_models import ReadNote, ReadRelevance
 from src.paper_retrieval.models import PaperDocument
 
@@ -201,7 +196,8 @@ class ReadAgent(BaseAgent):
 
         payload = {
             "用户主题": topic,
-            "用户要求": constraints,
+            # 指定论文列表属于编排输入，不能进入单篇 Reader 的上下文。
+            "用户要求": {key: value for key, value in constraints.items() if key != "papers"},
             "论文": {
                 "标题": paper.title,
                 "摘要": paper.abstract,

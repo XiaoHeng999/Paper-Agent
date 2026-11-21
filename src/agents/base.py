@@ -7,10 +7,8 @@ from typing import Any
 from src.llm import ProviderSnapshot
 
 from .contracts import AgentRole, JsonObject
-from src.llm.base import normalize_token_usage
-from .environment import AgentEnvironment
-from .skills import SkillRegistry
 from .tools import ToolRegistry
+from src.llm.base import normalize_token_usage
 
 
 # 后端节点只允许从前端配置的三个固定模型档位中选择模型。
@@ -30,7 +28,6 @@ class AgentSpec:
     description: str
     llm_profile: str = "default_agent"
     tools: tuple[str, ...] = ()
-    skills: tuple[str, ...] = ()
     input_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -44,16 +41,13 @@ class AgentSpec:
 class AgentContext:
     """Agent 运行时上下文。
 
-    这里仅暴露当前 Agent 允许访问的能力，例如 LLM、工具、技能与环境信息，
+    这里仅暴露当前 Agent 允许访问的能力，例如 LLM 与用量上报，
     而具体业务输入统一从图状态 `State` 中读取。
     """
 
     spec: AgentSpec = None
     llm: ProviderSnapshot | None = None
     tools: ToolRegistry = field(default_factory=ToolRegistry)
-    skills: SkillRegistry = field(default_factory=SkillRegistry)
-    environment: AgentEnvironment = field(default_factory=AgentEnvironment)
-    trace: JsonObject = field(default_factory=dict)
     # 模型调用完成后由节点提供回调，把真实用量写入对应的运行卡片。
     usage_callback: Any | None = None
 
@@ -61,8 +55,7 @@ class AgentContext:
 class BaseAgent(ABC):
     """所有论文流程 Agent 的统一基类。
 
-    新设计下，Agent 不再依赖独立的 `AgentRunInput/Output` 契约，
-    而是直接接收共享状态，并返回一个待合并的局部状态更新字典。
+    Agent 直接接收编排状态，并返回一个待合并的局部状态更新字典。
     """
 
     spec: AgentSpec
@@ -72,6 +65,7 @@ class BaseAgent(ABC):
 
         self.context = context
         self.spec = context.spec
+        self.context.tools = context.tools.select(self.spec.tools)
 
     def run(self, state: JsonObject) -> JsonObject:
         """执行单步任务并返回局部状态更新。

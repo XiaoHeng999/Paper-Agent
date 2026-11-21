@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "provenance": "Source-grounded draft labels prepared by AI; not human expert ground truth. Small regression seed, not a representative benchmark.",
+  "sources": [
+    {
+      "id": "transformer:3.1",
+      "paper_id": "1706.03762v7",
+      "title": "Attention Is All You Need",
+      "url": "https://arxiv.org/html/1706.03762v7#S3.SS1",
+      "locator": "§3.1 Encoder",
+      "level": "full_text",
+      "text": "The first is a multi-head self-attention mechanism, and the second is a simple, position-wise fully connected feed-forward network."
+    },
+    {
+      "id": "rank:abstract",
+      "paper_id": "2103.03404v2",
+      "title": "Attention is Not All You Need: Pure Attention Loses Rank Doubly Exponentially with Depth",
+      "url": "https://arxiv.org/abs/2103.03404v2",
+      "locator": "Abstract; conditional rank collapse statement",
+      "level": "abstract",
+      "text": "Specifically, without skip connections or multi-layer perceptrons (MLPs), the output converges doubly exponentially to a rank-1 matrix."
+    },
+    {
+      "id": "bert:abstract",
+      "paper_id": "1810.04805v2",
+      "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+      "url": "https://arxiv.org/abs/1810.04805v2",
+      "locator": "Abstract; pretraining context",
+      "level": "abstract",
+      "text": "jointly conditioning on both left and right context in all layers."
+    },
+    {
+      "id": "xl:abstract",
+      "paper_id": "1901.02860v3",
+      "title": "Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context",
+      "url": "https://arxiv.org/abs/1901.02860v3",
+      "locator": "Abstract; architecture",
+      "level": "abstract",
+      "text": "It consists of a segment-level recurrence mechanism and a novel positional encoding scheme."
+    }
+  ],
+  "cases": [
+    {
+      "id": "transformer-ffn",
+      "split": "development",
+      "source_ids": [
+        "transformer:3.1"
+      ],
+      "claims": [
+        {
+          "paper_id": "1706.03762v7",
+          "statement": "编码器层除注意力子层外还包含前馈子层。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "transformer:3.1"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "supported",
+        "experimental_support": "unknown"
+      },
+      "rationale": "原文明确列出第二个前馈子层；这一架构描述并不能证明实验充分性。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "transformer-only-attention",
+      "split": "development",
+      "source_ids": [
+        "transformer:3.1"
+      ],
+      "claims": [
+        {
+          "paper_id": "1706.03762v7",
+          "statement": "编码器层只有注意力子层，没有前馈子层。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "transformer:3.1"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "contradicted",
+        "experimental_support": "unknown"
+      },
+      "rationale": "第二个子层的明确描述反驳了没有前馈网络。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "rank-conditional",
+      "split": "development",
+      "source_ids": [
+        "rank:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "2103.03404v2",
+          "statement": "在去掉跳跃连接和 MLP 的条件下，作者报告输出趋向秩一。",
+          "kind": "method",
+          "conditions": "无跳跃连接且无 MLP",
+          "evidence_ids": [
+            "rank:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "supported",
+        "experimental_support": "unknown"
+      },
+      "rationale": "必须保留无跳跃连接与无 MLP 的条件；摘要不够核查完整证明或实验。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "rank-overgeneralized",
+      "split": "development",
+      "source_ids": [
+        "rank:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "2103.03404v2",
+          "statement": "这段原文证明带有 MLP 的所有 Transformer 都必然发生同样的秩退化。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "rank:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "unknown",
+        "experimental_support": "unknown"
+      },
+      "rationale": "摘录限定在无 MLP 的情形，不能据此判定含 MLP 的所有模型；未证实不等于反证。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "bert-bidirectional",
+      "split": "holdout",
+      "source_ids": [
+        "bert:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "1810.04805v2",
+          "statement": "作者报告各层表示同时使用左右两侧的上下文。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "bert:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "supported",
+        "experimental_support": "unknown"
+      },
+      "rationale": "对应摘要对双向条件的陈述；不评价下游效果。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "bert-left-only",
+      "split": "holdout",
+      "source_ids": [
+        "bert:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "1810.04805v2",
+          "statement": "作者报告各层表示只使用左侧上下文。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "bert:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "contradicted",
+        "experimental_support": "unknown"
+      },
+      "rationale": "原文同时指明左与右两个方向。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "xl-recurrence",
+      "split": "holdout",
+      "source_ids": [
+        "xl:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "1901.02860v3",
+          "statement": "模型设计包含跨片段的循环机制与位置编码方案。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "xl:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "fidelity": "supported",
+        "experimental_support": "unknown"
+      },
+      "rationale": "这是设计组成的忠实转述，不能由摘要推断性能比较公平。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "titles-are-not-conflicts",
+      "split": "development",
+      "source_ids": [
+        "transformer:3.1",
+        "rank:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "1706.03762v7",
+          "statement": "编码器含前馈子层。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "transformer:3.1"
+          ]
+        },
+        {
+          "paper_id": "2103.03404v2",
+          "statement": "移除 MLP 等组件的纯注意力网络出现秩退化。",
+          "kind": "result",
+          "conditions": "无跳跃连接和 MLP",
+          "evidence_ids": [
+            "rank:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "incomparable"
+      },
+      "rationale": "标题措辞相反不是实验冲突；所给摘录并未对齐问题和实验条件，不能建立强关系。",
+      "annotation_status": "source_grounded_draft"
+    },
+    {
+      "id": "shared-family-not-equivalent",
+      "split": "holdout",
+      "source_ids": [
+        "bert:abstract",
+        "xl:abstract"
+      ],
+      "claims": [
+        {
+          "paper_id": "1810.04805v2",
+          "statement": "表示同时使用左右上下文。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "bert:abstract"
+          ]
+        },
+        {
+          "paper_id": "1901.02860v3",
+          "statement": "结构使用片段循环。",
+          "kind": "method",
+          "conditions": "unknown",
+          "evidence_ids": [
+            "xl:abstract"
+          ]
+        }
+      ],
+      "reference": {
+        "relation": "incomparable"
+      },
+      "rationale": "同属 Transformer 不代表方法同质；仅凭这两段摘要不能对齐任务、预算和指标。",
+      "annotation_status": "source_grounded_draft"
+    }
+  ]
+}

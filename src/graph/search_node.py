@@ -29,11 +29,6 @@ class SearchNodeSink(Protocol):
         topic: str,
         intent: SearchIntent,
         raw_papers: list[PaperDocument],
-        # DEPRECATED: 2026-08-22
-        # 原因：关键词打分逻辑已下线，不再产出打分明细，写盘参数随之停用。
-        # 替代方案：无（打分明细只有调试用途，没有下游业务读取）。
-        # 计划移除：语义过滤稳定运行一段时间后清理。
-        # scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
         search_summary: JsonObject,
         search_output: JsonObject,
@@ -42,34 +37,6 @@ class SearchNodeSink(Protocol):
     ): ...
 
 
-# DEPRECATED: 2026-08-22
-# 原因：关键词打分逻辑已下线，不再需要携带评分细节的论文结构。
-# 替代方案：语义过滤直接处理 PaperDocument，不再依赖打分结果。
-# 计划移除：语义过滤稳定运行一段时间后清理。
-# @dataclass(slots=True)
-# class ScoredPaper:
-#     """表示带评分细节的候选论文。"""
-#
-#     paper: PaperDocument
-#     score: float
-#     title_hits: int
-#     abstract_hits: int
-#     keyword_phrase_in_title: bool
-#     keyword_phrase_in_abstract: bool
-#     matched_terms: list[str]
-#
-#     def to_dict(self) -> JsonObject:
-#         """把评分结果转成普通字典，方便写盘和调试。"""
-#
-#         return {
-#             "paper": self.paper.to_dict(),
-#             "score": self.score,
-#             "title_hits": self.title_hits,
-#             "abstract_hits": self.abstract_hits,
-#             "keyword_phrase_in_title": self.keyword_phrase_in_title,
-#             "keyword_phrase_in_abstract": self.keyword_phrase_in_abstract,
-#             "matched_terms": list(self.matched_terms),
-#         }
 
 
 @dataclass(slots=True)
@@ -90,7 +57,7 @@ def run_search_agent_node():
         """异步执行检索节点，让图层可以自然接入 ainvoke。"""
 
         resolved_service = cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
-        resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm") or load_search_agent_llm())
+        resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm"))
         resolved_sink = _resolve_search_sink(state)
         reporter = _resolve_reporter(state)
         runtime_resources = _resolve_runtime_resources(state)
@@ -174,13 +141,6 @@ def run_search_agent_node():
         # 候选池按数据源均摊截取，避免单一数据源霸占候选池。
         pool = _balanced_pool(searchable_papers, candidate_pool_size)
 
-        # DEPRECATED: 2026-08-22
-        # 原因：关键词打分只看字面命中，阈值过滤会把“不含搜索词但内容相关”的论文直接筛掉。
-        # 替代方案：候选池交给 _filter_semantically_relevant 按语义判断相关性。
-        # 计划移除：语义过滤稳定运行一段时间后清理。
-        # # 先按关键词命中打分排序，再取前 candidate_pool_size 篇作为候选池。
-        # scored_papers = _score_papers(intent, searchable_papers, fallback_limit=candidate_pool_size)
-        # pool = scored_papers[:candidate_pool_size]
 
         # 语义过滤：把候选池交给大模型按“研究内容是否真正相关”再筛一轮。
         # 语义过滤能识别“搜机器学习时 transformer 论文也相关”这种字面命中做不到的事。
@@ -202,11 +162,6 @@ def run_search_agent_node():
         # 语义过滤后保留的论文直接截断到用户要的篇数，作为最终检索结果。
         search_results = list(semantic_kept[:max_results])
 
-        # DEPRECATED: 2026-08-22
-        # 原因：随关键词打分一起下线，不再产出打分明细。
-        # 替代方案：无（打分明细只有调试用途，没有下游业务读取）。
-        # 计划移除：语义过滤稳定运行一段时间后清理。
-        # search_scores = [item.to_dict() for item in scored_papers]
         drop_stats = _build_drop_stats(raw_papers, searchable_papers)
         drop_stats.update(
             {
@@ -259,8 +214,6 @@ def run_search_agent_node():
                 topic=state["request"].topic,
                 intent=intent,
                 raw_papers=raw_papers,
-                # DEPRECATED: 2026-08-22 随关键词打分下线，写盘不再带打分明细。
-                # scored_papers=search_scores,
                 selected_papers=search_results,
                 search_summary=search_summary,
                 search_output=search_output,
@@ -290,8 +243,6 @@ def run_search_agent_node():
         return State(
             request=state["request"],
             search_results=search_results,
-            # DEPRECATED: 2026-08-22 随关键词打分下线，状态里不再携带打分明细。
-            # search_scores=search_scores,
             search_summary=search_summary,
             search_output=search_output,
             search_artifact_refs=search_artifact_refs,
@@ -311,7 +262,16 @@ def run_search_agent_node():
             assistant_message_metadata=dict(state.get("assistant_message_metadata") or {}),
         )
 
-    return _node
+    async def guarded(state):
+        owned = "search_node_llm" not in state
+        llm = load_search_agent_llm() if owned else state["search_node_llm"]
+        try:
+            return await _node({**state, "search_node_llm": llm})
+        finally:
+            if owned and llm is not None:
+                await llm.aclose()
+
+    return guarded
 
 
 def _resolve_reporter(state: State):
@@ -618,69 +578,6 @@ def _merge_duplicate_paper(target: PaperDocument, duplicate: PaperDocument) -> N
         target.pdf_url = duplicate.pdf_url
 
 
-# DEPRECATED: 2026-08-22
-# 原因：按关键词字面命中打分会把“不含搜索词但内容相关”的论文直接筛掉，
-#       例如搜索“机器学习”时，transformer 论文因字面不命中被阈值过滤丢弃。
-# 替代方案：候选池直接交给 _filter_semantically_relevant 做语义相关性过滤。
-# 计划移除：语义过滤稳定运行一段时间后清理。
-# def _score_papers(intent: SearchIntent, papers: list[PaperDocument], *, fallback_limit: int | None = None) -> list[ScoredPaper]:
-#     """根据检索意图对候选论文打分并排序。"""
-#
-#     # 中文注释：粗筛打分只看模型生成的关键词和检索式，标题命中权重大一些，摘要命中权重小一些。
-#     # 标题通常更直接说明论文是否贴题，所以这里给标题命中 2 倍分。
-#     scoring_sources = [*intent.keywords, *[subtopic.keyword for subtopic in intent.subtopics]]
-#     tokens = _build_scoring_tokens(scoring_sources)
-#     phrase_terms = _build_scoring_phrases(scoring_sources)
-#     threshold = _score_threshold(tokens)
-#     scored_items: list[ScoredPaper] = []
-#     for paper in papers:
-#         title_text = _normalize_text(paper.title)
-#         abstract_text = _normalize_text(paper.abstract or "")
-#         title_hits = sum(1 for token in tokens if token in title_text)
-#         abstract_hits = sum(1 for token in tokens if token in abstract_text)
-#         keyword_phrase_in_title = any(term in title_text for term in phrase_terms)
-#         keyword_phrase_in_abstract = any(term in abstract_text for term in phrase_terms)
-#         score = float(title_hits * 2.0 + abstract_hits * 1.0)
-#         if keyword_phrase_in_title:
-#             score += 3.0
-#         if keyword_phrase_in_abstract:
-#             score += 1.5
-#         matched_terms = _collect_matched_terms(tokens, phrase_terms, title_text, abstract_text)
-#         scored_items.append(
-#             ScoredPaper(
-#                 paper=paper,
-#                 score=score,
-#                 title_hits=title_hits,
-#                 abstract_hits=abstract_hits,
-#                 keyword_phrase_in_title=keyword_phrase_in_title,
-#                 keyword_phrase_in_abstract=keyword_phrase_in_abstract,
-#                 matched_terms=matched_terms,
-#             )
-#         )
-#     selected = [item for item in scored_items if item.score >= threshold]
-#     if not selected:
-#         # 中文注释：当阈值过高导致全部被筛掉时，不要一股脑退回所有候选，
-#         # 而是退回候选池大小的前几名，避免把不相关论文塞给后面的语义过滤。
-#         scored_items.sort(
-#             key=lambda item: (
-#                 item.score,
-#                 item.paper.year or 0,
-#                 len(item.paper.authors),
-#             ),
-#             reverse=True,
-#         )
-#         if fallback_limit is not None:
-#             return scored_items[:fallback_limit]
-#         return scored_items
-#     selected.sort(
-#         key=lambda item: (
-#             item.score,
-#             item.paper.year or 0,
-#             len(item.paper.authors),
-#         ),
-#         reverse=True,
-#     )
-#     return selected
 
 
 def _candidate_count(target_count: int, *, min_size: int = 20, multiplier: int = 5, max_size: int = 60) -> int:
@@ -782,83 +679,3 @@ def _paper_dedupe_key(paper: PaperDocument) -> str:
     if paper_id:
         return f"paper_id:{paper_id}"
     return f"title:{paper.title.strip().lower()}"
-# DEPRECATED: 2026-08-22
-# 原因：以下都是关键词打分的辅助函数，随打分逻辑一起下线。
-# 替代方案：语义过滤直接使用论文标题和摘要原文，不再拆词统计。
-# 计划移除：语义过滤稳定运行一段时间后清理。
-# def _extract_query_terms(text: str) -> list[str]:
-#     """从文本里提取适合做打分的关键词。"""
-#
-#     seen: set[str] = set()
-#     results: list[str] = []
-#     for token in re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+(?:[-_][a-zA-Z0-9]+)*", text.lower()):
-#         normalized = token.strip()
-#         if len(normalized) <= 1 or normalized in {"and", "or", "not"} or normalized in seen:
-#             continue
-#         seen.add(normalized)
-#         results.append(normalized)
-#     return results
-#
-#
-# def _build_scoring_tokens(keywords: list[str]) -> list[str]:
-#     """把关键词拆成用于命中统计的 token 列表。"""
-#
-#     seen: set[str] = set()
-#     scoring_tokens: list[str] = []
-#     for candidate in keywords:
-#         for token in _extract_query_terms(candidate):
-#             if token in seen:
-#                 continue
-#             seen.add(token)
-#             scoring_tokens.append(token)
-#     return scoring_tokens
-#
-#
-# def _build_scoring_phrases(keywords: list[str]) -> list[str]:
-#     """保留完整关键词短语，方便做短语级命中。"""
-#
-#     seen: set[str] = set()
-#     phrase_terms: list[str] = []
-#     for candidate in keywords:
-#         normalized = _normalize_text(candidate)
-#         if len(normalized) <= 1 or normalized in seen:
-#             continue
-#         seen.add(normalized)
-#         phrase_terms.append(normalized)
-#     return phrase_terms
-#
-#
-# def _collect_matched_terms(
-#     tokens: list[str],
-#     phrase_terms: list[str],
-#     title_text: str,
-#     abstract_text: str,
-# ) -> list[str]:
-#     """汇总当前论文命中的关键词和短语。"""
-#
-#     matched_terms: list[str] = []
-#     seen: set[str] = set()
-#     for candidate in [*phrase_terms, *tokens]:
-#         if candidate in seen:
-#             continue
-#         if candidate in title_text or candidate in abstract_text:
-#             seen.add(candidate)
-#             matched_terms.append(candidate)
-#     return matched_terms
-#
-#
-# def _normalize_text(text: str) -> str:
-#     """统一大小写和空白，减少命中判断时的噪声。"""
-#
-#     return " ".join(text.lower().split())
-#
-#
-# def _score_threshold(tokens: list[str]) -> float:
-#     """根据关键词数量给出一个比较温和的最低分阈值。"""
-#
-#     token_count = len(tokens)
-#     if token_count >= 6:
-#         return 4.0
-#     if token_count >= 3:
-#         return 2.5
-#     return 1.5

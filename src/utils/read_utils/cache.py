@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,10 @@ def safe_cache_name(value: str) -> str:
     """
 
     cleaned = "".join(character if character.isalnum() or character in {"-", "_", "."} else "_" for character in value)
-    return cleaned[:160] or "paper"
+    # Distinct paper IDs must not share a source cache after filename normalization.
+    if cleaned != value or len(cleaned) > 140 or cleaned in {"", ".", ".."}:
+        return (cleaned[:140].strip(".") or "paper") + "_" + hashlib.sha256(value.encode()).hexdigest()[:16]
+    return cleaned
 
 
 def write_metadata(cache_dir: Path, paper: PaperDocument, *, source_url: str | None, content_type: str | None) -> Path:

@@ -289,6 +289,17 @@ def _convert_messages(messages: Sequence[Message]) -> tuple[str | None, list[Jso
             continue
         content = message.get("content") or ""
         blocks = content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
+        converted_blocks = []
+        for block in blocks:
+            if block.get("type") == "image_url":
+                url = block["image_url"]["url"]
+                if not url.startswith("data:image/png;base64,"):
+                    raise ValueError("视觉证据仅支持内嵌 PNG")
+                converted_blocks.append({"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": url.split(",", 1)[1]}})
+            else:
+                converted_blocks.append(block)
+        blocks = converted_blocks
         if role == "assistant" and message.get("tool_calls"):
             # assistant 发起工具调用时，需要把 tool_calls 展开成 content 中的 tool_use block。
             blocks = list(blocks) + [_convert_tool_call(call) for call in message.get("tool_calls") or []]

@@ -33,8 +33,3 @@ read:
   chunk_overlap: 150
   vector_store_path: data/vector_store
   vector_store_collection: papers
-  # 全文提取后是否再回读原文做证据验证（验证不通过会按 verify_max_retries 重提）。
-  verify_enabled: true
-  verify_max_retries: 1
-  verify_max_chars: 120000
-  verify_optional_fields: [limitations]

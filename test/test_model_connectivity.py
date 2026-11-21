@@ -15,7 +15,7 @@ def _live_connectivity_test_enabled() -> bool:
     3. 因此默认关闭，只有在手动设置环境变量后才执行。
     """
 
-    return True
+    return os.getenv("RUN_MODEL_CONNECTIVITY_TEST") == "1"
 
 
 def _resolve_agent_name(config: ModelConfig) -> str:

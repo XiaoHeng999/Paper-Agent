@@ -31,7 +31,7 @@ def build_paper_search_tool(service: PaperSearchService | None = None) -> Tool:
     ) -> list[dict[str, object]]:
         """执行检索并只返回论文列表。
 
-        SearchAgent 当前按单源逐条 query 调用工具，因此这里保持最薄的返回结构，
+        该适配器供需要工具接口的调用方使用；主图直接调用检索服务。这里保持最薄的返回结构，
         只把统一论文字典列表透传回去。
         """
 

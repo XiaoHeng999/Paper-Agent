@@ -14,6 +14,7 @@ import {
 
 import { ApiRequestError, cancelSessionRun, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
 import SessionComposer from "../components/session/SessionComposer.vue";
+import ResearchPanel from "../components/session/ResearchPanel.vue";
 import SessionTimeline from "../components/session/SessionTimeline.vue";
 import StatusPill from "../components/StatusPill.vue";
 import { createReadableId } from "../lib/random-id";
@@ -21,6 +22,7 @@ import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
 import { pushToast } from "../stores/notifications";
 import type {
   SessionRuntimeEvent,
+  SessionRunAccepted,
   SessionConstraints,
   SessionSummary,
   SessionThread,
@@ -42,7 +44,8 @@ const selectedSessionKey = ref("");
 const selectedTitle = ref("新的研究主题");
 const selectedRunStartedAt = ref<string | null>(null);
 const draft = ref("");
-const constraints = ref<SessionConstraints>({});
+const defaultConstraints = (): SessionConstraints => ({ output_mode: "paper_report", cross_paper_enabled: false });
+const constraints = ref<SessionConstraints>(defaultConstraints());
 const threadLoading = ref(false);
 const sending = ref(false);
 const cancelling = ref(false);
@@ -139,12 +142,12 @@ const taskStatusLabel = computed(() => {
 });
 
 /**
- * 右侧只展示工作流最后生成的论文，检索结果和阅读笔记等中间文件不放在这里。
- * 后端用 final_review 标记最终论文，这样会话里保存再多其他产物，页面也不会把它们混在一起。
+ * 右侧展示独立阅读报告和最终报告，原始检索文件保留在会话产物中。
+ * 兼容旧 final_review 与新 final_report、paper_report 产物。
  */
 const finalArtifacts = computed(() => {
   const artifacts = timelineSnapshot.value?.artifacts ?? [];
-  return artifacts.filter((artifact) => artifact.artifact_type === "final_review");
+  return artifacts.filter((artifact) => ["final_review", "final_report", "paper_report"].includes(artifact.artifact_type));
 });
 
 /** 将树形事件展开成一维数组，只用于统计，不会改变时间线的显示结构。 */
@@ -177,6 +180,15 @@ function formatArtifactSize(size: number) {
 }
 
 /** 拼接产物文件的下载/预览地址，会话还没确定时返回 "#"，避免生成无效链接。 */
+const researchArtifactId = computed(() => [...(timelineSnapshot.value?.artifacts ?? [])].reverse().find(a => a.artifact_type === "research_state")?.id ?? "");
+function onResearchRevision(accepted: SessionRunAccepted) {
+  activeRunId.value = accepted.run_id;
+  aggregator.addOptimisticUserMessage("修订判断并重新核查", accepted.turn_id);
+  syncSnapshot();
+  emit("refreshSessions");
+  openStream(selectedSessionKey.value, accepted.stream_url);
+}
+
 function artifactUrlFor(artifactId: string) {
   if (!selectedSessionKey.value || !artifactId) return "#";
   return `/api/sessions/${encodeURIComponent(selectedSessionKey.value)}/artifacts/${encodeURIComponent(artifactId)}`;
@@ -220,7 +232,7 @@ async function selectSession(sessionKey: string) {
   activeRunId.value = null;
   cancelling.value = false;
   selectedSessionKey.value = sessionKey;
-  constraints.value = {};
+  constraints.value = defaultConstraints();
   threadLoading.value = true;
   try {
     const thread = await fetchSessionThread(sessionKey);
@@ -255,7 +267,7 @@ function resetToBlankWorkspace() {
   closeStream(true);
   selectedSessionKey.value = "";
   selectedTitle.value = "新的研究主题";
-  constraints.value = {};
+  constraints.value = defaultConstraints();
   selectedRunStartedAt.value = null;
   timelineSnapshot.value = null;
   sending.value = false;
@@ -565,6 +577,8 @@ function handleError(error: unknown, title: string) {
             @resume="resumeLatestCheckpoint"
           />
 
+          <ResearchPanel v-if="researchArtifactId" :session-key="selectedSessionKey" :artifact-id="researchArtifactId" :busy="isRunning || sending" @revision="onResearchRevision" />
+
           <section v-if="finalResultMarkdown" class="session-final-result">
             <div class="session-final-result-head"><h3>最终结果</h3></div>
             <pre class="session-final-result-body">{{ finalResultMarkdown }}</pre>
@@ -635,7 +649,7 @@ function handleError(error: unknown, title: string) {
               <span><strong>{{ artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }} · 点击打开</small></span>
             </a>
           </template>
-          <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>任务完成后会显示最终论文</span></div>
+          <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>任务完成后会显示阅读报告</span></div>
         </section>
       </aside>
     </section>

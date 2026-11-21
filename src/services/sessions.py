@@ -10,6 +10,7 @@ from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.utils import get_logger, logging_context
 from src.utils.readable_id import create_readable_id
+from src.research.models import ResearchOptions, validate_checkpoint_options
 
 
 JsonObject = dict[str, Any]
@@ -105,6 +106,8 @@ def submit_message(
 
     body = body or {}
     content = str(body.get("content") or "")
+    ResearchOptions.from_constraints(body.get("constraints", {}))
+    validate_checkpoint_options(body.get("read_resume_checkpoint"), body.get("constraints"))
     if not content.strip() and not body.get("media"):
         raise ValueError("content is required")
 

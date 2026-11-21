@@ -1,6 +1,6 @@
 import unittest
 
-from src.agents import ReviewRequest
+from src.agents import ResearchRequest
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, build_search_agent
 from src.llm.base import LLMResponse
@@ -40,7 +40,7 @@ class SearchAgentToolIntegrationTest(unittest.TestCase):
         provider = _FakeProvider('{"keywords":["multi-agent systems","literature review automation","academic retrieval"]}')
         agent = SearchAgent(AgentContext(spec=SearchAgent.spec, llm=_FakeSnapshot(provider)))
         state = {
-            "request": ReviewRequest(
+            "request": ResearchRequest(
                 topic="多智能体文献综述自动化",
                 constraints={"sources": ["openalex"], "max_results": 5, "year_from": 2022},
             )
@@ -60,7 +60,7 @@ class SearchAgentToolIntegrationTest(unittest.TestCase):
 
         agent = build_search_agent(llm=None)
         state = {
-            "request": ReviewRequest(
+            "request": ResearchRequest(
                 topic="literature review automation",
                 constraints={"sources": ["openalex"], "max_results": 5, "year_from": 2022},
             )

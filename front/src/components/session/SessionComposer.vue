@@ -64,7 +64,10 @@ const quickTopics: TopicSuggestion[] = [
 const hasConstraints = computed(() => {
   const value = props.constraints;
   return Boolean(
-    value.year_from !== undefined ||
+    value.visual_verification === false || value.visual_page_limit !== undefined || Boolean(value.score_weights && Object.keys(value.score_weights).length) ||
+      value.cross_paper_enabled === true ||
+      (value.output_mode !== undefined && value.output_mode !== "paper_report") ||
+      value.year_from !== undefined ||
       value.year_to !== undefined ||
       value.max_results !== undefined ||
       value.deep_read_limit !== undefined ||
@@ -125,6 +128,22 @@ function updateExcludedTerms(event: Event) {
   updateConstraint("excluded_terms", terms);
 }
 
+const scoringDimensions = [
+  ["evidence_sufficiency", "证据充分性"], ["comparison_fairness", "比较公平性"],
+  ["method_increment", "方法增量"], ["reproducibility", "复现透明度"], ["scope_clarity", "范围清晰度"],
+];
+function updateWeight(key: string, event: Event) {
+  const value = Number((event.target as HTMLInputElement).value);
+  const weights = { ...props.constraints.score_weights };
+  if (Number.isFinite(value) && value > 0) weights[key] = value; else delete weights[key];
+  updateConstraint("score_weights", Object.keys(weights).length ? weights : undefined);
+}
+function updateCrossPermission(event: Event) {
+  const next = {...props.constraints, cross_paper_enabled: (event.target as HTMLInputElement).checked};
+  if (!next.cross_paper_enabled) next.allow_external_search = false;
+  emit("update:constraints", next);
+}
+
 function toggleSource(source: string, event: Event) {
   const checked = (event.target as HTMLInputElement).checked;
   const sources = new Set(props.constraints.sources ?? []);
@@ -157,6 +176,28 @@ function onKeydown(event: KeyboardEvent) {
 
 <template>
   <section class="session-composer-card" :data-variant="props.variant" :aria-busy="running || sending">
+    <fieldset :disabled="running || sending" class="research-task-options">
+      <legend>阅读任务</legend>
+      <label>报告形式
+        <select class="field" :value="constraints.output_mode ?? 'paper_report'" @change="updateConstraint('output_mode', ($event.target as HTMLSelectElement).value as SessionConstraints['output_mode'])">
+          <option value="paper_report">逐篇独立报告</option>
+          <option value="paper_cards">简要判断卡</option>
+          <option value="comparison">跨论文比较报告</option>
+          <option value="review">综述 / 报告汇编</option>
+        </select>
+      </label>
+      <label><input type="checkbox" :checked="constraints.cross_paper_enabled ?? false" @change="updateCrossPermission" />允许跨论文分析</label>
+      <label><input type="checkbox" :checked="constraints.visual_verification ?? true" @change="updateConstraint('visual_verification', ($event.target as HTMLInputElement).checked)" />核查 PDF 图表与扫描原页（需模型支持图像）</label>
+      <label>每篇视觉候选页上限 <input type="number" min="1" max="20" :value="constraints.visual_page_limit ?? 6" @change="updateConstraint('visual_page_limit', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><input type="checkbox" :disabled="!constraints.cross_paper_enabled" :checked="constraints.allow_external_search ?? false" @change="updateConstraint('allow_external_search', ($event.target as HTMLInputElement).checked)" />允许外部反证补搜（默认最多补入 2 篇候选论文）</label>
+      <details><summary>可选：指定评分目标与权重</summary>
+        <label>评分目标<input :value="constraints.scoring_goal ?? ''" placeholder="例如：选择优先复现的论文" @input="updateConstraint('scoring_goal', ($event.target as HTMLInputElement).value)" /></label>
+        <label v-for="[key, title] in scoringDimensions" :key="key">{{ title }}<input type="number" min="0" step="0.1" :value="constraints.score_weights?.[key] ?? ''" placeholder="不计入总分" @input="updateWeight(key, $event)" /></label>
+        <p>仅在目标、权重和对应维度证据齐全时计算加权分；unknown 不按零分处理。此评分不代表领域新颖性认证。</p>
+      </details>
+      <p v-if="!constraints.cross_paper_enabled">每篇论文独立阅读、核查并生成报告；比较与综述选项将输出逐篇报告汇编。</p>
+      <p v-else>至少有两篇可用论文时分析关系；资料不足时仍输出逐篇报告。</p>
+    </fieldset>
     <template v-if="isWelcomeVariant">
       <header class="session-welcome-heading">
         <span class="session-welcome-badge"><Sparkles :size="15" />新建研究会话</span>
@@ -322,3 +363,12 @@ function onKeydown(event: KeyboardEvent) {
     </template>
   </section>
 </template>
+
+<style scoped>
+.research-task-options {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 12px; margin: 0 0 16px; border: 1px solid var(--border-color, #d8dde6); border-radius: 12px;
+}
+.research-task-options label { display: flex; align-items: center; gap: 8px; }
+.research-task-options p { flex-basis: 100%; margin: 0; font-size: 13px; }
+</style>

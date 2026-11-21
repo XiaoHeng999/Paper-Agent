@@ -16,7 +16,7 @@
 
 ## 🆕 2.0 版本更新
 
-Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的多智能体核心思路，但在工程实现上做了全面升级：
+Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。当前核心是逐篇判断与原文核查，跨论文分析和综述写作按需启用：
 
 - **前端**改为 Vue 3 + TypeScript + Vite，交互更现代、响应更快；
 - **包管理**统一使用 `uv`，一条命令即可完成 Python 依赖安装；
@@ -33,7 +33,7 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a88a2823-9724-4a7a-aee4-fafbfef068a6" width="720" alt="Paper-Agent 会话工作台" />
   <br>
-  <em>输入研究主题，实时追踪检索 → 阅读 → 分析 → 大纲 → 写作全流程进度</em>
+  <em>输入研究主题，实时追踪检索 → 阅读 → 判断与核查的实时进度</em>
 </p>
 
 <p align="center">
@@ -52,7 +52,7 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 |------|---------|-----------------|
 | 初步了解陌生研究方向 | 手动搜索多个来源，逐个打开论文判断相关度，**耗时费力** | 从 arXiv / OpenAlex / Semantic Scholar 自动检索，按主题和约束去重、筛选、整理 |
 | 论文阅读与资料积累 | 读完一篇记一篇笔记，资料散落在各处，**容易丢失和重复** | 先读摘要判断相关性，再按条件下载全文、解析、切分，建立本地可检索资料 |
-| 撰写领域综述 | 边读边写，反复调整结构，**常常写到一半推倒重来** | 从子主题分析和全局分析生成结构化大纲，再逐节按证据写作 |
+| 撰写领域综述 | 边读边写，反复调整结构，**常常写到一半推倒重来** | 按需比较主张与适用条件，使用已核查主张生成并核查综述段落 |
 | 管理长流程任务 | 每跑一步都担心进度、状态和重启后丢失，**不敢中途停下** | 会话、运行状态、阶段产物和实时进度都在工作台可见，可随时保存与恢复 |
 | 控制模型成本 | 全程用一个模型档位，**不清楚每个环节花了多少 token** | 不同阶段使用不同模型档位，并展示实际 token 用量 |
 
@@ -64,11 +64,11 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 
 | | 特性 | 一句话说明 |
 |--|------|-----------|
-| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重评分 |
-| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 抽取 → 写入本地向量库；依赖不可用时保存恢复现场 |
-| 🔬 | **分层研究分析** | `AnalyseAgent` 先按子主题逐篇分析，再做全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
-| ✍️ | **证据约束下的综述写作** | `WritingOutlineAgent` 生成大纲与证据映射，`WritingAgent` 逐节写作、证据不足时检索补充、完成后审查并限次修改 |
-| 📡 | **实时会话工作台** | SSE 实时推送检索、阅读、分析、大纲与逐节写作进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
+| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重筛选 |
+| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 逐篇判断 → 原文核查；依赖不可用时保存恢复现场 |
+| 🔬 | **分层研究分析** | 逐篇生成前提、方法、结果与局限判断；仅在允许跨篇时比较主张关系 |
+| ✍️ | **证据约束下的综述写作** | 可选 Writer 依据已核查主张生成段落，再由 Verifier 回查原文；默认交付独立论文报告 |
+| 📡 | **实时会话工作台** | SSE 实时推送检索、来源准备、论文判断与核查进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
 | 🎛️ | **可视化模型配置** | 在浏览器中管理 Provider 协议、API 地址、密钥与三个 Agent 档位、embedding 参数，一键测试连通性，保存即生效 |
 
 ---
@@ -76,17 +76,16 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 ## 🔧 工作流
 
 ```mermaid
-flowchart LR
-    U[研究主题] --> S[SearchAgent\n生成检索计划]
-    S --> R[多来源检索\narXiv / OpenAlex / Semantic Scholar]
-    R --> RA[ReadAgent\n摘要阅读与相关性判断]
-    RA --> FT[全文处理\n下载 / Markdown / 分块 / 向量索引]
-    FT --> A[AnalyseAgent\n子主题分析与全局分析]
-    A --> O[WritingOutlineAgent\n生成章节与证据映射]
-    O --> W[WritingAgent\n逐节写作与审查]
-    W --> P[会话产物\n综述正文与引用]
-    FT -. 依赖不可用 .-> C[保存恢复现场]
-    C -. 修复配置后继续 .-> RA
+flowchart TD
+    S[主题检索或指定论文] --> P[来源准备：下载、解析、分块]
+    P --> R[逐篇 Reader：判断与原文引用]
+    R --> V[单篇 Evidence Verifier]
+    V --> D[独立论文报告]
+    V --> C{允许跨篇且至少两篇可用?}
+    C -->|是| A[主张关系分析与核查]
+    A --> O[比较报告]
+    A -->|请求综述| W[Writer 与段落核查]
+    W --> F[综述报告]
 ```
 
 ---
@@ -98,12 +97,12 @@ flowchart LR
 | 运行时 | Python 3.12+、`uv`、Uvicorn |
 | 后端 API | FastAPI、REST、Server-Sent Events（SSE） |
 | 工作流 | LangGraph、TypedDict 共享状态 |
-| Agent | Search、Read、Analyse、Writing Outline、Writing |
+| Agent | Search、Paper Reader、Evidence Verifier、可选 Analyst / Writer |
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
 | 全文处理 | `pypdf`、Markdown 转换、文本分块 |
-| 向量检索 | ChromaDB |
-| 会话存储 | SQLite + 本地 JSON/Markdown/向量文件 |
+| 向量检索 | ChromaDB；按论文和原文版本隔离召回 |
+| 会话存储 | SQLite + 本地 JSON/Markdown/原文分块 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
 
 ---
@@ -125,16 +124,17 @@ Paper-Agent/
 │   ├── src/views/                  # 会话工作台、系统设置页
 │   └── vite.config.ts              # 开发服务器、代理和端口配置
 ├── src/
-│   ├── agents/                     # Agent 定义、模型调用和写作工具
+│   ├── agents/                     # 检索规划与摘要筛选
 │   ├── api/                        # FastAPI 应用与路由
+│   ├── research/                   # 判断、范围隔离、可选比较与核查
 │   ├── graph/                      # LangGraph 主流程和各阶段节点
 │   ├── llm/                        # Provider 适配、配置解析和统一响应
 │   ├── models/                     # 会话、协议和阅读领域模型
 │   ├── paper_retrieval/            # 论文模型、检索服务和来源连接器
-│   ├── repositories/               # SQLite、JSON、Chroma 与阶段产物持久化
+│   ├── repositories/               # SQLite、JSON 与阶段产物持久化
 │   ├── services/                   # 会话、运行、设置和工作流服务
 │   └── utils/                      # 日志、缓存、全文解析和分块工具
-├── data/                           # 本地数据库、论文缓存、会话和向量数据
+├── data/                           # 本地数据库、论文缓存、会话和原文分块
 ├── logs/                           # 运行日志
 └── test/                           # unittest 测试与联调辅助代码
 ```
@@ -163,7 +163,7 @@ npm run front:install
 1. `providers` 中存在一个可用 Provider，并填写 `api_base`；
 2. `api_key` 或 `api_key_env` 能提供有效密钥；
 3. `agents.default_agent` 已配置；
-4. `embedding_profiles.default_embedding` 已指向可用的 embedding Provider。
+研究流程不要求 embedding 服务；原文按证据 ID 回查。
 
 ### 3. 启动后端
 
@@ -199,9 +199,7 @@ npm run front:dev:network
 | --- | --- | --- |
 | `SearchAgent` | `luna_agent` | 从研究主题生成关键词、子主题和检索约束 |
 | `ReadAgent` | `default_agent` | 阅读摘要，判断相关性并整理笔记 |
-| `AnalyseAgent` | `solar_agent` | 分析子主题，并综合研究现状与趋势 |
-| `WritingOutlineAgent` | `default_agent` | 生成正文大纲和证据映射 |
-| `WritingAgent` | `default_agent` | 逐节写作、调用资料工具和审查修改 |
+| Reader / Verifier / 可选 Analyst 与 Writer | `default_agent` | 独立上下文内生成判断、回查证据与按需写作 |
 
 没有配置 `luna_agent` / `solar_agent` 时回退到必需的 `default_agent`；`default_agent` 缺失时配置无法工作。
 
@@ -227,7 +225,7 @@ npm run front:dev:network
 
 ### 系统参数
 
-`config/system.yaml` 主要影响阅读节点：缓存目录、连接/下载超时、最大文件大小、文本分块、向量库路径与集合名等参数均可在此调整。
+`config/system.yaml` 主要影响阅读节点：缓存目录、连接/下载超时、最大文件大小、文本分块等参数均可在此调整。
 
 ---
 
@@ -275,3 +273,9 @@ npm run front:dev:network
 **让论文检索更快，让研究脉络更清楚。**
 
 </div>
+
+向量入库与召回已接入新研究流程：有全文且配置了 embedding profile 时，`src/research/retrieval.py` 将版本化原文片段写入 ChromaDB。Reader 优先读取召回片段，但仍分批覆盖全部原文；Verifier 和可选 Analyst 召回补充证据后回查当前版本原文。数据库查询和返回值校验均限制论文范围。模型与维度采用独立集合，原文版本采用独立索引范围，重复运行复用已入库片段。配置沿用 `read.vector_store_path`、`read.vector_store_collection` 和现有 embedding profile；未配置或调用失败时回退到原文阅读，并在报告 `retrieval` 中记录原因与实际用量。检索只提供候选证据，不代表核查通过。
+
+视觉证据核查、真实论文评测与人工修订增量更新的配置和命令见 [使用说明](docs/visual-evaluation-incremental.md)。评测集目前是带来源的待审参考标签，专家共识指标只接受实际人工标注。
+
+完整的历轮改造、基础设施恢复、深度审查修复、测试记录与现存限制，见 [项目改进总记录](docs/project-improvement-history.md)。

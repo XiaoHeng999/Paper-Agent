@@ -62,14 +62,6 @@ class ReadDefaults:
     chunk_overlap: int = 150
     vector_store_path: str = "data/vector_store"
     vector_store_collection: str = "papers"
-    # 全文提取后是否再回读原文做证据验证。
-    verify_enabled: bool = True
-    # 验证不通过时最多重提几次（重提次数越多越慢，本地资源充足也建议保持较小的值）。
-    verify_max_retries: int = 1
-    # 验证时原文最多保留的字符数，防止超长论文撑爆模型上下文。
-    verify_max_chars: int = 120000
-    # 可选字段：原文确实没写也不算提取错误。
-    verify_optional_fields: tuple[str, ...] = ("limitations",)
 
 
 @dataclass(slots=True)
@@ -163,10 +155,6 @@ class SystemConfig:
                 chunk_overlap=_read_non_negative_int(read.get("chunk_overlap"), 150),
                 vector_store_path=str(read.get("vector_store_path") or "data/vector_store"),
                 vector_store_collection=str(read.get("vector_store_collection") or "papers"),
-                verify_enabled=_optional_bool(read.get("verify_enabled")) is not False,
-                verify_max_retries=_read_non_negative_int(read.get("verify_max_retries"), 1),
-                verify_max_chars=_read_positive_int(read.get("verify_max_chars"), 120000),
-                verify_optional_fields=_string_tuple(read.get("verify_optional_fields"), default=("limitations",)),
             ),
         )
 
@@ -461,16 +449,6 @@ def _optional_text(value: Any) -> str | None:
     return text or None
 
 
-def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:
-    """把配置里的字符串列表整理成元组，没有或格式错误时使用默认值。"""
-
-    if isinstance(value, str):
-        items = [item.strip() for item in value.split(",") if item.strip()]
-    elif isinstance(value, (list, tuple)):
-        items = [str(item).strip() for item in value if str(item).strip()]
-    else:
-        return default
-    return tuple(items) if items else default
 
 
 def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) -> int:

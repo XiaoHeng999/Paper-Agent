@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import hashlib
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -64,7 +65,8 @@ async def async_convert_fulltext_to_markdown(
     markdown_path = _markdown_output_path(source_path)
     # 中文注释：哪怕只是看缓存文件存不存在，本质上也是本地磁盘操作。
     # 这里照样放进 to_thread，避免异步阅读流程在高并发时被本地文件检查拖慢。
-    cached = await asyncio.to_thread(_load_cached_markdown, markdown_path)
+    current = await asyncio.to_thread(markdown_source_is_current, paper, source_path, markdown_path)
+    cached = await asyncio.to_thread(_load_cached_markdown, markdown_path) if current else None
     if cached is not None:
         return cached
 
@@ -72,12 +74,35 @@ async def async_convert_fulltext_to_markdown(
     if suffix == ".pdf":
         # 中文注释：PDF 解析和 Markdown 写入都是最容易卡住主流程的本地重操作。
         # 这里只把真正重的那一小段丢进线程，不把整个阅读节点都包进线程里。
-        return await asyncio.to_thread(_convert_pdf_with_parser, paper, source_path, source_url, markdown_path)
-    if suffix in {".html", ".htm"}:
+        converted = await asyncio.to_thread(_convert_pdf, paper, source_path, source_url, markdown_path)
+    elif suffix in {".html", ".htm"}:
         # 中文注释：HTML 读取、正文提取、Markdown 落盘同样都是阻塞型本地操作。
         # 处理方式和 PDF 保持一致，边界清楚，后面接异步阅读流程会更稳。
-        return await asyncio.to_thread(_convert_html, paper, source_path, source_url, markdown_path)
-    return MarkdownConversion(warnings=[_UNSUPPORTED_FULLTEXT_WARNING])
+        converted = await asyncio.to_thread(_convert_html, paper, source_path, source_url, markdown_path)
+    else:
+        return MarkdownConversion(warnings=[_UNSUPPORTED_FULLTEXT_WARNING])
+    if converted.markdown_path:
+        await asyncio.to_thread(_save_source_version, paper, source_path, markdown_path)
+    return converted
+
+
+def _source_version(paper, source_path):
+    with source_path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"policy": "preserve-source-v2", "paper_id": paper.paperId or paper.id, "source_sha256": digest}
+
+
+def markdown_source_is_current(paper, source_path, markdown_path):
+    try:
+        cached = json.loads(markdown_path.with_suffix(".source.json").read_text(encoding="utf-8"))
+        return _has_non_empty_file(markdown_path) and cached == _source_version(paper, source_path)
+    except (OSError, ValueError):
+        return False
+
+
+def _save_source_version(paper, source_path, markdown_path):
+    markdown_path.with_suffix(".source.json").write_text(
+        json.dumps(_source_version(paper, source_path)), encoding="utf-8")
 
 
 def _markdown_output_path(source_path: Path) -> Path:
@@ -106,22 +131,14 @@ def _has_non_empty_file(path: Path) -> bool:
 def _convert_pdf(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
     """读取 PDF 每一页的文字，并把页码写进 Markdown 便于后续定位。"""
 
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return MarkdownConversion(warnings=["未安装 pypdf，暂时无法读取 PDF 正文"])
-    try:
-        reader = PdfReader(str(source_path))
-        pages = [page.extract_text() or "" for page in reader.pages]
-    except Exception as exc:
-        return MarkdownConversion(warnings=[f"PDF 正文读取失败：{exc}"])
-    if not any(page.strip() for page in pages):
-        return MarkdownConversion(warnings=["PDF 中没有可读取的文字，可能是扫描文件"])
-    body: list[str] = [_markdown_header(paper, source_url, len(pages))]
-    for index, page_text in enumerate(pages, start=1):
-        body.extend([f"<!-- page: {index} -->", _normalise_text(page_text)])
+    parsed = get_pdf_parser().parse(source_path)
+    if not parsed.pages:
+        return MarkdownConversion(warnings=parsed.warnings)
+    body = [_markdown_header(paper, source_url, len(parsed.pages))]
+    for page in parsed.pages:
+        body.extend([f"<!-- page: {page.page_number} -->", page.text])
     markdown_path.write_text("\n\n".join(body).strip() + "\n", encoding="utf-8")
-    return MarkdownConversion(markdown_path=markdown_path, page_count=len(pages))
+    return MarkdownConversion(markdown_path=markdown_path, page_count=len(parsed.pages), warnings=parsed.warnings)
 
 
 def _convert_html(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
@@ -163,31 +180,8 @@ def _read_page_count(markdown_path: Path) -> int | None:
         return None
 
 
-def _normalise_text(value: str) -> str:
-    """整理 PDF 抽取出的多余空行，让正文更适合后续分段。"""
-
-    return re.sub(r"\n{3,}", "\n\n", value.replace("\x00", "")).strip()
 
 
-def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
-    """使用可替换的 PDF 解析器生成 Markdown。
-
-    中文注释：阅读节点只需要 Markdown，不应该关心 PDF 到底是 pypdf、PyMuPDF
-    还是其它工具解析的。这里先使用 pypdf 解析器，后续新增解析器时只需要改
-    get_pdf_parser 的选择规则。
-    """
-
-    parser = get_pdf_parser("pypdf")
-    parsed = parser.parse(source_path)
-    if parsed.warnings:
-        return MarkdownConversion(warnings=parsed.warnings)
-    if not parsed.pages:
-        return MarkdownConversion(warnings=["PDF 中没有可读取的正文"])
-    body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages))]
-    for page in parsed.pages:
-        body.extend([f"<!-- page: {page.page_number} -->", page.text])
-    markdown_path.write_text("\n\n".join(body).strip() + "\n", encoding="utf-8")
-    return MarkdownConversion(markdown_path=markdown_path, page_count=len(parsed.pages))
 
 
 class _ArticleHtmlParser(HTMLParser):

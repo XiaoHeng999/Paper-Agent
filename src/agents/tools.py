@@ -61,12 +61,3 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
-
-
-def not_implemented_tool(name: str, description: str, parameters_schema: JsonObject | None = None) -> Tool:
-    """生成占位工具，先把架构接口立住，真实数据库接入后替换 handler 即可。"""
-
-    def _handler(**_: Any) -> Any:
-        raise NotImplementedError(f"tool {name} is not implemented")
-
-    return Tool(ToolSpec(name, description, parameters_schema or {}), _handler)

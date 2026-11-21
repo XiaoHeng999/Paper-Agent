@@ -15,6 +15,7 @@ from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
 from src.utils import get_logger, logging_context
 from src.utils.readable_id import create_readable_id
+from src.research.models import ResearchOptions, validate_checkpoint_options
 
 
 JsonObject = dict[str, Any]
@@ -252,6 +253,7 @@ class SessionRunService:
         """创建一次新的后台运行，并立即返回 SSE 地址。"""
 
         body = body or {}
+        ResearchOptions.from_constraints(body.get("constraints", {}))
         record = self.repo.get(session_key)
         checkpoint = body.get("read_resume_checkpoint")
         if _should_resume_from_last_checkpoint(body):
@@ -263,6 +265,7 @@ class SessionRunService:
             body = copy.deepcopy(body)
             body["read_resume_checkpoint"] = checkpoint
 
+        validate_checkpoint_options(checkpoint, body.get("constraints"))
         content = str(body.get("content") or "")
         has_resume_checkpoint = isinstance(checkpoint, dict)
         if not content.strip() and not body.get("media") and not has_resume_checkpoint:
