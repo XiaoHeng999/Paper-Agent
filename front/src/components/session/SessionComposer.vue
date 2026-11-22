@@ -65,7 +65,7 @@ const hasConstraints = computed(() => {
   const value = props.constraints;
   return Boolean(
     value.visual_verification === false || value.visual_page_limit !== undefined || Boolean(value.score_weights && Object.keys(value.score_weights).length) ||
-      value.cross_paper_enabled === true ||
+      value.cross_paper_enabled === true || value.image_embedding_enabled === false || value.image_embedding_model === "clip" ||
       (value.output_mode !== undefined && value.output_mode !== "paper_report") ||
       value.year_from !== undefined ||
       value.year_to !== undefined ||
@@ -138,6 +138,14 @@ function updateWeight(key: string, event: Event) {
   if (Number.isFinite(value) && value > 0) weights[key] = value; else delete weights[key];
   updateConstraint("score_weights", Object.keys(weights).length ? weights : undefined);
 }
+function updateImageEmbedding(event: Event) {
+  const model = (event.target as HTMLSelectElement).value;
+  if (model === "off") {
+    updateConstraint("image_embedding_enabled", false);
+  } else if (model === "qwen2-vl" || model === "clip") {
+    emit("update:constraints", { ...props.constraints, image_embedding_enabled: true, image_embedding_model: model });
+  }
+}
 function updateCrossPermission(event: Event) {
   const next = {...props.constraints, cross_paper_enabled: (event.target as HTMLInputElement).checked};
   emit("update:constraints", next);
@@ -187,6 +195,13 @@ function onKeydown(event: KeyboardEvent) {
       </label>
       <label><input type="checkbox" :checked="constraints.cross_paper_enabled ?? false" @change="updateCrossPermission" />允许跨论文分析</label>
       <label><input type="checkbox" :checked="constraints.visual_verification ?? true" @change="updateConstraint('visual_verification', ($event.target as HTMLInputElement).checked)" />核查 PDF 图表与扫描原页（需模型支持图像）</label>
+      <label>图文检索模型
+        <select class="field" :value="constraints.image_embedding_enabled === false ? 'off' : constraints.image_embedding_model ?? 'qwen2-vl'" @change="updateImageEmbedding">
+          <option value="qwen2-vl">GME-Qwen2-VL-2B（默认）</option>
+          <option value="clip">CLIP ViT-B/32</option>
+          <option value="off">关闭图文向量检索</option>
+        </select>
+      </label>
       <label>每篇视觉候选页上限 <input type="number" min="1" max="20" :value="constraints.visual_page_limit ?? 6" @change="updateConstraint('visual_page_limit', Number(($event.target as HTMLInputElement).value))" /></label>
       <label><input type="checkbox" :checked="constraints.allow_external_search ?? false" @change="updateConstraint('allow_external_search', ($event.target as HTMLInputElement).checked)" />允许按需查阅外部论文佐证（无需开启跨篇比较，最多补入 2 篇）</label>
       <details><summary>可选：指定评分目标与权重</summary>

@@ -20,3 +20,4 @@ dependencies = [
 
 [project.optional-dependencies]
 image-retrieval = ["numpy>=1.26", "onnxruntime>=1.17", "tokenizers>=0.20"]
+gme = ["torch>=2.6,<2.10", "torchvision>=0.21,<0.25", "transformers==4.51.3"]

@@ -82,6 +82,8 @@ export interface SessionConstraints {
   cross_paper_enabled?: boolean;
   visual_verification?: boolean;
   visual_page_limit?: number;
+  image_embedding_enabled?: boolean;
+  image_embedding_model?: "qwen2-vl" | "clip";
   allow_external_search?: boolean;
   research_reasoning_enabled?: boolean;
   external_paper_limit?: number;

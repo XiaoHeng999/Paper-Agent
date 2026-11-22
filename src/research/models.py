@@ -25,10 +25,11 @@ class ResearchOptions:
     reasoning_enabled: bool = True
     visual_verification: bool = True
     visual_page_limit: int = 6
-    image_embedding_enabled: bool = False
+    image_embedding_enabled: bool = True
     evidence_reranking_enabled: bool = False
     scoring_goal: str = ""
     score_weights: dict[str, float] = field(default_factory=dict)
+    image_embedding_model: Literal["qwen2-vl", "clip"] = "qwen2-vl"
 
     @classmethod
     def from_constraints(cls, constraints: dict) -> ResearchOptions:
@@ -74,9 +75,12 @@ class ResearchOptions:
             raise ValueError("计算总分前必须明确 scoring_goal")
         visual = constraints.get("visual_verification", True)
         reranking = constraints.get("evidence_reranking_enabled", False)
-        image_embedding = constraints.get("image_embedding_enabled", False)
+        image_embedding = constraints.get("image_embedding_enabled", True)
         if type(image_embedding) is not bool:
             raise ValueError("image_embedding_enabled 必须是布尔值")
+        image_model = constraints.get("image_embedding_model", "qwen2-vl")
+        if image_model not in ("qwen2-vl", "clip"):
+            raise ValueError("image_embedding_model 必须是 qwen2-vl 或 clip")
         page_limit = constraints.get("visual_page_limit", 6)
         if type(visual) is not bool or type(reranking) is not bool or type(page_limit) is not int or not 1 <= page_limit <= 20:
             raise ValueError("visual_verification 和 evidence_reranking_enabled 必须是布尔值，visual_page_limit 必须为 1–20")
@@ -89,7 +93,7 @@ class ResearchOptions:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"research_{key} 必须是 {low} 到 {high} 的整数")
             limits[key] = value
-        return cls(image_embedding_enabled=image_embedding, reasoning_enabled=reasoning, visual_verification=visual,
+        return cls(image_embedding_enabled=image_embedding, image_embedding_model=image_model, reasoning_enabled=reasoning, visual_verification=visual,
             evidence_reranking_enabled=reranking, visual_page_limit=page_limit,
             output_mode=mode, cross_paper_enabled=enabled, allow_external_search=external,
             external_paper_limit=external_limit, scoring_goal=goal.strip(), score_weights=weights, **limits)

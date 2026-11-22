@@ -744,11 +744,13 @@ Evidence Packet 现在为关系扩展命中的候选记录一条实际检索路�
 
 对正文中全称首字母与括号缩写一致、且同篇只有一个全称的实体，第一跳可沿 `definition_of` 跨页找回定义；同缩写有多个全称时跳过。对于带显式实验编号的设置、消融和局限，第二跳也可以用同一编号和目标段落的直接标记建立关系。如果两端都给出实验编号但编号不同或不唯一，共享图表编号也不会触发这条扩展。对系统推论，如果已选第二跳终点被对应子问题的 Claim 引用，核查时会补读路径起点和中间节点；单篇卡片列出边、依据及链路判断。受控样例可运行 `python -m evaluation.multihop_retrieval` 检查正确路径和误连。
 
-可选图像通道使用本地量化 CLIP，仅在用户子问题有视觉缺口时对当前论文最多八个已定位对象排序。图片向量在本次任务中复用，前两个对象的证据进入 RRF；模型不可用时在卡片写入告警并继续原检索。默认关闭。研究任务约束设置 `image_embedding_enabled: true` 后，默认从 `$XDG_CACHE_HOME/paper-agent/clip-vit-base-patch32/<revision>` 加载模型（未设置 XDG_CACHE_HOME 时使用 ~/.cache）。也可通过 `PAPER_AGENT_CLIP_DIR` 指定模型目录。
+图文检索默认使用本地 `Alibaba-NLP/gme-Qwen2-VL-2B-Instruct`（revision `9cfa6413f704a7c1cf5064d240748e10c876b286`）。模型按需加载，将问题与「原图裁剪＋对应图注」分别编码；缺少图注时使用裁剪本身。每篇最多比较八个可定位对象，前两个结果参与证据选择。权重在同一进程内复用，裁剪向量按任务、图像版本、坐标和图注缓存。首次加载时校验本地权重、推理代码和配置的 SHA-256。缺少依赖或模型文件时记录警告并继续文本检索。
 
-模型使用 Xenova/clip-vit-base-patch32 的固定 revision `6b7c523703ae26e39be4b03774966f8571c7f523`。将该 revision 的 `onnx/text_model_quantized.onnx`、`onnx/vision_model_quantized.onnx`、`preprocessor_config.json`、`tokenizer.json` 放在同一目录内。运行时核对 SHA-256，不需要远程推理。使用 `python -m evaluation.visual_retrieval <PDF路径>` 可复现指定真实论文的图注对照；输入 PDF 的 SHA-256 必须与标注一致。加上 `--full-text --read-crops` 会从 PDF 重新解析全文并纳入竞争候选，检查首选对象、原页版本和图内文字。独立读字使用对象边界内的原生文字及本地 Tesseract（需安装可执行文件）。生产流程中，轴标签、图例或单位问题可使用三个方向的本地 OCR 作为转录提示，仍由视觉模型回看原图。
+阅读任务的「图文检索模型」提供 GME、CLIP 和关闭三个选项。API 可设置 `image_embedding_model` 为 `qwen2-vl` 或 `clip`，也可用 `image_embedding_enabled: false` 关闭。GME 依赖安装命令为 `uv sync --locked --extra gme`，默认权重目录为 `/data/models/liveact/qwen-vl/gme-Qwen2-VL-2B-Instruct`，可用 `PAPER_AGENT_GME_DIR` 指定。CLIP 使用 `Xenova/clip-vit-base-patch32` 的本地量化 ONNX 文件，revision 为 `6b7c523703ae26e39be4b03774966f8571c7f523`，默认从 `$XDG_CACHE_HOME/paper-agent/clip-vit-base-patch32/<revision>` 加载（未设置 XDG_CACHE_HOME 时使用 ~/.cache），支持 `PAPER_AGENT_CLIP_DIR`。
 
-全文视觉 A/B 覆盖六篇 PDF 的十五个对象定位问题。其中一篇只有一个可裁剪候选。纯文本首选命中 5/15，开启本地 CLIP 后命中 12/15，十二个命中都能回查正确版本的原页。十三题附有图中文字标注，图像通道有十题同时满足正确对象、原页和读字匹配（八题原生文字、两题 OCR）。另三道定位题分别把 Transformer 架构、DETR 流程、ResNet 网络层图选成了同篇其他图。样本是开发回归集，包含具有可定位裁剪的目标，并未估计所有 PDF 的裁剪覆盖率。
+使用 `uv run --locked --extra gme --extra image-retrieval python -m evaluation.visual_retrieval <PDF路径> --full-text --read-crops --image-model qwen2-vl` 可以从原始 PDF 复现全文候选、对象定位、原页版本和图内读字核对。将模型参数改为 `clip` 可运行同题对照。
+
+六篇 PDF、十五个定位问题上，纯文本首选命中 5/15，CLIP 命中 12/15，GME 联合图注命中 13/15。十三个 GME 命中均能回查正确版本的原页。GME 找回了 CLIP 漏掉的 Transformer 架构图和 ResNet 网络层图，但漏掉了 CLIP 找对的 ResNet 误差曲线图；两者都漏掉 DETR 流程图。十三个带可见文字标注的问题中，两种模型各有十题同时通过对象、原页及原生文字或本地 OCR 匹配。其中一篇论文只有一个可裁剪候选。该组数字衡量现有开发样本上的整条检索路径，不能区分编码器与附加图注各自的贡献。
 
 在三篇缓存论文上运行 `python -m evaluation.pdf_evidence_pairs data/paper_cache` 可重建全文、校验源文件哈希并按原页逐段核对。三个问题都要求图注及另一页的正文同时进入同一证据包，当前命中 3/3。受控两跳评测另有七个正例和两个负例，检查关系类型以及是否出现误连。两组定向评测的标注由 AI 准备。
 

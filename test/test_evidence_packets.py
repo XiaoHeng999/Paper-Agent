@@ -174,6 +174,17 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         packet, = await build_evidence_packets(scope, plan(query), None)
         self.assertFalse(any(h.relation == "definition_of" for t in packet.candidate_trace for h in t.retrieval_path))
 
+    def test_visual_model_selection_and_legacy_options(self):
+        from src.research.image_retrieval import ClipIndex, GmeIndex
+        for constraints, expected in [
+                ({}, GmeIndex), ({"image_embedding_enabled": True}, GmeIndex),
+                ({"image_embedding_model": "clip"}, ClipIndex),
+                ({"image_embedding_enabled": False, "image_embedding_model": "clip"}, type(None))]:
+            options = ResearchOptions.from_constraints(constraints)
+            self.assertIsInstance(ModelTasks(None, options).image_index, expected)
+        with self.assertRaises(ValueError):
+            ResearchOptions.from_constraints({"image_embedding_model": "unknown"})
+
     async def test_optional_image_channel_is_scoped_and_fails_back_to_text(self):
         oid = "p1:visual-object:figure:1"
         span = EvidenceSpan(id="caption", paper_id="p1", version="1", text="Figure 1: Results.",

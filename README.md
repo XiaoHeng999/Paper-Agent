@@ -64,6 +64,8 @@ uv run --locked python main.py
 uv run --locked --env-file .env python main.py
 ```
 
+在阅读任务中，「图文检索模型」默认选择本地 GME-Qwen2-VL-2B，也可选择 CLIP 或关闭。需要同时使用两种模型时，用 `uv run --locked --extra gme --extra image-retrieval python main.py` 启动。GME 权重默认读取 `/data/models/liveact/qwen-vl/gme-Qwen2-VL-2B-Instruct`，可通过 `PAPER_AGENT_GME_DIR` 指定其他目录。模型仅在需要按图检索时加载。[模型配置与实测结果](docs/jit-multimodal-pdf-retrieval-design.md#13-当前实现状态)
+
 ## 使用入口
 
 | 场景 | 入口 |

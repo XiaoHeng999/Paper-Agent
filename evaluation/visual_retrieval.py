@@ -1,4 +1,4 @@
-"""Paired offline visual retrieval on the annotated PDF, using local CLIP weights."""
+"""Paired offline visual retrieval on the annotated PDF, using local GME or CLIP weights."""
 import argparse
 import asyncio
 import json
@@ -25,7 +25,7 @@ def _normalize(text):
     return re.sub(r"[^a-z0-9]+", "", text.casefold())
 
 
-async def evaluate(path, full_text=False, read_crops=False):
+async def evaluate(path, full_text=False, read_crops=False, image_model="qwen2-vl"):
     fixtures = json.loads(Path(__file__).with_name("visual-retrieval.json").read_text())
     pages, _, _ = inspect_pdf(path, 20)
     fixture = next((f for f in fixtures if pages and f["source_version"] == pages[0]["source_version"]), None)
@@ -55,7 +55,7 @@ async def evaluate(path, full_text=False, read_crops=False):
     output = {}
     ocr = {}
     for enabled in (False, True):
-        tasks = ModelTasks(None, ResearchOptions(image_embedding_enabled=enabled))
+        tasks = ModelTasks(None, ResearchOptions(image_embedding_enabled=enabled, image_embedding_model=image_model))
         tasks.visual_pages = {(pid, p["page"]): p for p in pages}
         tasks.visual_catalog = {pid: pages}
         results = []
@@ -93,7 +93,7 @@ async def evaluate(path, full_text=False, read_crops=False):
             results.append(result)
         if tasks.reranking_warnings:
             raise RuntimeError(tasks.reranking_warnings)
-        mode = "clip" if enabled else "text" if full_text else "caption"
+        mode = image_model if enabled else "text" if full_text else "caption"
         output[mode] = {"cases": results,
             "recall_at_1": sum(r["correct"] for r in results)/len(results),
             "image_queries": tasks.image_index.audit if enabled else []}
@@ -105,5 +105,6 @@ if __name__ == "__main__":
     parser.add_argument("pdf", type=Path)
     parser.add_argument("--full-text", action="store_true", help="Include native PDF chunks and object views")
     parser.add_argument("--read-crops", action="store_true", help="Check annotated visible text using local Tesseract")
+    parser.add_argument("--image-model", choices=["qwen2-vl", "clip"], default="qwen2-vl")
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(evaluate(args.pdf, args.full_text, args.read_crops)), ensure_ascii=False, indent=2))
+    print(json.dumps(asyncio.run(evaluate(args.pdf, args.full_text, args.read_crops, args.image_model)), ensure_ascii=False, indent=2))
