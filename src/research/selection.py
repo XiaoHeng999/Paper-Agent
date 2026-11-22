@@ -8,14 +8,15 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from .multimodal import find_object_labels
 from .models import (
     EvidenceCandidateTrace, EvidencePacket, IncrementJudgmentBatch, NodeJudgmentBatch,
-    ReadingPlan, ReadingSubquery, version_of,
+    ReadingPlan, ReadingSubquery, RetrievalHop, version_of,
 )
 
 
 _RRF_OFFSET = 60
-_POLICY = "rrf-relation-greedy-v1"
+_POLICY = "rrf-relation-greedy-v2"
 
 _REQUIREMENT_TERMS = {
     "problem": ("problem", "motivation", "challenge", "问题", "动机", "挑战"),
@@ -27,6 +28,7 @@ _REQUIREMENT_TERMS = {
     "baseline": ("baseline", "compared with", "state-of-the-art", "基线", "对比方法"),
     "metric": ("metric", "accuracy", "precision", "recall", "f1", "bleu", "指标", "准确率"),
     "budget": ("budget", "parameter", "flop", "cost", "预算", "参数量", "计算量", "成本"),
+    "precision": ("fp16", "bf16", "fp32", "fp8", "fp64", "int8", "int4", "mixed precision", "混合精度"),
     "hardware": ("gpu", "cpu", "tpu", "hardware", "a100", "v100", "硬件", "显卡"),
     "result": ("result", "performance", "outperform", "improve", "结果", "性能", "提升"),
     "ablation": ("ablation", "remove", "variant", "消融", "移除", "变体"),
@@ -53,14 +55,18 @@ async def build_evidence_packets(scope, plan: ReadingPlan, tasks, *, per_packet_
 
     packets = []
     for subquery in sorted(plan.subqueries, key=lambda item: -item.priority):
-        ranked = await _hybrid_candidates(scope, subquery, tasks)
-        packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes)
+        ranked, paths = await _hybrid_candidates(scope, subquery, tasks)
+        packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
+        expanded = _expand_reference_gaps(scope, packet, ranked, paths)
+        if expanded:
+            ranked = expanded
+            packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
         repair_rounds = getattr(getattr(tasks, "options", None), "max_repair_rounds", 0)
         if packet.missing_requirements and packet.repair_queries and repair_rounds > 0:
             gap_hits = await scope.search(packet.repair_queries[0], tasks, 8)
             if gap_hits:
                 ranked = _merge_gap_hits(ranked, gap_hits)
-                packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes)
+                packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
         packets.append(packet)
     return packets
 
@@ -113,7 +119,8 @@ async def refine_packets_with_model(tasks, scope, packets: list[EvidencePacket])
         for item in candidates:
             anchor_id = anchors.get(item["subquery_id"], "")
             if anchor_id and item["evidence_id"] != anchor_id:
-                increments_payload.append({**item, "anchor_id": anchor_id})
+                increments_payload.append({**item, "anchor_id": anchor_id,
+                    "anchor_text": scope.spans[anchor_id].text[:3000]})
         increments = await tasks.ask("increment_verifier",
             "相对同一子问题的 Anchor，逐项判断候选的增量角色。conflict 和 clarification 即使相似度低也应明确标出；"
             "redundant 表示没有新增信息，irrelevant 表示不能帮助当前问题。只返回已提供的组合。", {
@@ -154,6 +161,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
             channels[span.id] = {"fallback"}
 
     seed_ids = [item[0] for item in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    paths = {}
+    seed_scores = dict(scores)
     for seed_id in seed_ids:
         seed = scope.spans[seed_id]
         related = []
@@ -167,14 +176,60 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
         for related_id in list(dict.fromkeys(value for value in related if value))[:4]:
             if related_id not in scope.spans:
                 continue
-            scores[related_id] = max(scores[related_id], scores[seed_id] * 0.72)
+            target = scope.spans[related_id]
+            if target.paper_id != seed.paper_id or related_id == seed_id:
+                continue
+            shared = sorted(set(seed.visual_object_ids) & set(target.visual_object_ids))
+            relation = "same_object" if shared else _relation(seed, target)
+            provenance = ", ".join(shared) if shared else (
+                seed.parent_id if relation == "same_parent" else "previous_id/next_id")
+            paths.setdefault(related_id, [RetrievalHop(source_id=seed.id, target_id=related_id,
+                relation=relation, confidence=1, provenance=provenance)])
+            scores[related_id] = max(scores[related_id], seed_scores[seed_id] * 0.72)
             channels.setdefault(related_id, set()).add("relation")
 
     return [(scope.spans[evidence_id], score, sorted(channels[evidence_id]))
-        for evidence_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:40]]
+        for evidence_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:40]], paths
 
 
-def _select_packet(scope, subquery, ranked, char_budget, max_nodes):
+def _expand_reference_gaps(scope, packet, ranked, paths):
+    gaps = set(packet.missing_requirements) & {
+        "hardware", "precision", "budget", "implementation", "ablation", "limitation"}
+    if not gaps:
+        return []
+    entries = {span.id: (span, score, channels) for span, score, channels in ranked}
+    hits = {}
+    for bridge_id in packet.evidence_ids:
+        if bridge_id not in paths:
+            continue
+        bridge = scope.spans[bridge_id]
+        labels = set(find_object_labels(bridge.text))
+        if not labels:
+            continue
+        for span in scope.spans.values():
+            if span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
+                continue
+            if span.id == paths[bridge_id][0].source_id or not _matched_requirements(span, gaps):
+                continue
+            shared = labels.intersection(find_object_labels(span.text))
+            if len(shared) == 1:
+                label, _ = next(iter(shared))
+                hits[span.id] = (span, bridge_id, label)
+                if len(hits) == 4:
+                    break
+        if len(hits) == 4:
+            break
+    for span, bridge_id, label in hits.values():
+        paths[span.id] = [*paths[bridge_id], RetrievalHop(source_id=bridge_id,
+            target_id=span.id, relation="explicit_reference", confidence=1,
+            provenance=f"shared explicit reference {label}")]
+        _, score, channels = entries.get(span.id, (span, 0, []))
+        entries[span.id] = (span, max(score, entries[bridge_id][1] * 0.72),
+            sorted(set(channels) | {"relation"}))
+    return sorted(entries.values(), key=lambda item: (-item[1], item[0].id))[:40] if hits else []
+
+
+def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths):
     required = [item.kind for item in subquery.evidence_requirements if item.required]
     matches = {span.id: _matched_requirements(span, required) for span, _, _ in ranked}
     anchor_entry = max(ranked, key=lambda item: (item[1] * 100 +
@@ -209,7 +264,7 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes):
     for span, score, channels in ranked:
         relation = _relation(anchor, span)
         trace.append(EvidenceCandidateTrace(evidence_id=span.id,
-            retrieval_channels=channels, fused_score=score,
+            retrieval_path=paths.get(span.id, []), retrieval_channels=channels, fused_score=score,
             matched_requirements=matches[span.id], relation=relation,
             anchor_id=anchor.id if anchor and span.id != anchor.id else ""))
     selected_ids = [item[0].id for item in selected]
@@ -304,10 +359,10 @@ def _rank_sections(spans, subquery, limit):
 
 
 def _rank_exact_references(spans, query):
-    references = re.findall(r"(?:fig(?:ure)?|table|eq(?:uation)?)\.?\s*\d+[a-z]?", query, re.I)
+    references = set(find_object_labels(query))
     if not references:
         return []
-    return [span for span in spans if any(reference.casefold() in span.text.casefold() for reference in references)]
+    return [span for span in spans if references.intersection(find_object_labels(span.text))]
 
 
 def _rank_requirements(spans, subquery, limit):

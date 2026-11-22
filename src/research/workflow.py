@@ -321,7 +321,7 @@ def run_research_node():
                             card.claims.append(claim)
                             card.verifications.append(previous_check)
                             continue
-                        result = await verify(tasks, claim, scope)
+                        result = await verify(tasks, claim, scope, evidence_packets=evidence_packets)
                         history.append({"target": claim.model_dump(), "verification": result.model_dump()})
                         if core_question and not tasks.terminal_error:
                             snapshot, issues = await review_core_question(tasks, core_question, claim, result,
@@ -353,7 +353,7 @@ def run_research_node():
                                     break
                                 current = []
                                 for new in repaired:
-                                    checked = await verify(tasks, new, scope)
+                                    checked = await verify(tasks, new, scope, evidence_packets=evidence_packets)
                                     history.append({"target": new.model_dump(), "verification": checked.model_dump()})
                                     current.append((new, checked))
                             except (ValueError, RuntimeError, TimeoutError) as exc:

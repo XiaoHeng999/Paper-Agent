@@ -174,27 +174,44 @@ def _packet_views(packets: list[EvidencePacket], supplied_ids: set[str]) -> list
             "anchor_id": packet.anchor_id if packet.anchor_id in supplied_ids else "",
             "covered_requirements": covered,
             "missing_requirements": [kind for kind in requirements if kind not in covered],
-            "candidate_trace": [item.model_dump() for item in trace],
+            "candidate_trace": [{**item.model_dump(), "retrieval_path": [
+                hop.model_dump() for hop in item.retrieval_path
+            ] if all({hop.source_id, hop.target_id} <= supplied_ids for hop in item.retrieval_path) else []}
+                for item in trace],
             "selection_policy": packet.selection_policy, "version": packet.version})
     return result
 
 
-async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportParagraph, evidence: ScopedEvidence, claims: list[Claim] | None = None, *, relations=None) -> VerificationResult:
+async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportParagraph, evidence: ScopedEvidence, claims: list[Claim] | None = None, *, relations=None, evidence_packets=()) -> VerificationResult:
     scope = "paper" if len(evidence.allowed) == 1 else "cross_paper"
     levels, raw, omitted, visual_context = [], [], [], []
     try:
-        raw, omitted = await evidence.adversarial(target.evidence_ids,
+        cited = set(target.evidence_ids)
+        chains = {}
+        for packet in evidence_packets:
+            for item in packet.candidate_trace:
+                path = item.retrieval_path
+                if len(path) == 2 and {path[0].source_id, item.evidence_id} <= cited:
+                    key = (path[0].source_id, path[0].target_id, item.evidence_id)
+                    chains[key] = [hop.model_dump() for hop in path]
+        core_ids = list(dict.fromkeys([*target.evidence_ids, *(key[1] for key in chains)]))
+        raw, omitted = await evidence.adversarial(core_ids,
             target.statement if hasattr(target, "statement") else target.rationale, tasks.options.context_chars, tasks)
         levels = sorted({x.source_level for x in raw})
         from .visual import verification_images
-        images, visual_context, visual_missing = verification_images(tasks, raw, target)
-        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+        images, visual_context, visual_missing = verification_images(tasks, raw, target.model_copy(update={"evidence_ids": core_ids}))
+        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+            "retrieval_chains": list(chains.values()),
             "visual_pages": visual_context, "visual_unchecked": visual_missing,
             "scope": scope, "allowed_paper_ids": sorted(evidence.allowed),
             "target": target.model_dump(), "claims": [x.model_dump() for x in claims or []],
             "relations": [r.model_dump() for r in relations or []],
             "evidence": [x.model_dump() for x in raw], "omitted_evidence_ids": omitted[:50], "omitted_evidence_count": len(omitted),
         }, VerificationDraft, images=images)
+        checks = {tuple(check.evidence_ids): check for check in draft.chain_checks}
+        if checks.keys() - chains.keys() or len(checks) != len(draft.chain_checks):
+            raise ValueError("Verifier 返回了未提供或重复的检索链")
+        unresolved = [key for key in chains if key not in checks or checks[key].status != "consistent"]
         supplied_pages = {(p['paper_id'], p['page'], p['image_version']) for p in visual_context}
         observed_pages = set()
         for observation in draft.visual_observations:
@@ -268,6 +285,12 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
         if draft.verdict == "verified" and (draft.counterevidence.status == "supported" or draft.experimental_support.status == "contradicted"):
             draft.verdict = "qualified"
             draft.repair_request = draft.repair_request or "结合已定位的反证或实验不足，收窄当前判断"
+        if unresolved:
+            draft.unchecked.extend("实验配置未对齐：" + " → ".join(key) for key in unresolved)
+            if draft.verdict == "verified":
+                draft.verdict = "qualified"
+                draft.reason += "；多跳证据的实验条件未确认"
+                draft.repair_request = draft.repair_request or "核对上述结果、基线和实验配置"
         if draft.verdict == "qualified" and not draft.repair_request.strip():
             raise ValueError("限定结论缺少修订要求")
         if visual_missing:

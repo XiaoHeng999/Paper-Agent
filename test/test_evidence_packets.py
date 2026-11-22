@@ -1,13 +1,13 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.llm.base import LLMResponse
-from src.research.agents import ModelTasks
+from src.research.agents import ModelTasks, verify
 from src.research.context import ScopedEvidence
 from src.research.models import (
-    Claim, EvidenceRequirement, EvidenceSpan, ReadingPlan, ReadingSubquery, ResearchOptions,
+    Claim, EvidenceRequirement, EvidenceSpan, ReadingPlan, ReadingSubquery, ResearchOptions, VerificationDraft,
 )
 from src.research.planning import coverage_for_plan
 from src.research.selection import build_evidence_packets, packet_priority, refine_packets_with_model
@@ -73,6 +73,43 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         trace = {item.evidence_id: item for item in packet.candidate_trace}
         self.assertIn("dense", trace["result"].retrieval_channels)
         self.assertEqual(trace["hardware"].relation, "adjacent")
+
+    async def test_precision_gap_reaches_setup_through_explicit_reference(self):
+        def span(key, text, **fields):
+            return EvidenceSpan(id=key, text=text, paper_id="p1", version="1",
+                source_level="full_text", **fields)
+
+        seed = span("seed", "Latency result.", next_id="bridge")
+        bridge = span("bridge", "Table 2: Timings")
+        # Exhaust the global requirement ranking with passages outside the packet budget.
+        distractions = [span(f"other{i}", "FP16 " + "unrelated " * 100) for i in range(16)]
+        wrong = span("wrong", "Table 20 uses FP16.")
+        setup = span("setup", "For Table 2 we used FP16.")
+        scope = ScopedEvidence([seed, bridge, *distractions, wrong, setup], {"p1"})
+        scope.search = AsyncMock(return_value=[seed])
+        query = subquery(["precision"], "Latency?")
+        packet = (await build_evidence_packets(scope, plan(query), None, per_packet_chars=120))[0]
+        trace = {item.evidence_id: item for item in packet.candidate_trace}
+        self.assertIn("setup", packet.evidence_ids)
+        self.assertNotIn("wrong", trace)
+        path = trace["setup"].retrieval_path
+        self.assertEqual([(e.source_id, e.relation, e.target_id) for e in path],
+            [("seed", "adjacent", "bridge"), ("bridge", "explicit_reference", "setup")])
+        self.assertIn("table:2", path[-1].provenance)
+        self.assertEqual(packet.missing_requirements, [])
+
+        claim = Claim(id="claim", paper_id="p1", version="1", statement="Latency with FP16",
+            evidence_ids=["seed", "setup"])
+        tasks = SimpleNamespace(options=SimpleNamespace(context_chars=4000),
+            ask=AsyncMock(return_value=VerificationDraft(verdict="verified", reason="reported",
+                evidence_ids=["seed"], fidelity={"status": "supported", "reason": "reported",
+                    "evidence_ids": ["seed"]})))
+        with patch("src.research.visual.verification_images", return_value=([], [], [])):
+            result = await verify(tasks, claim, scope, evidence_packets=[packet])
+        self.assertEqual(result.verdict, "qualified")
+        self.assertIn("bridge", result.inspected_evidence_ids)
+        self.assertTrue(result.repair_request)
+        self.assertEqual(len(tasks.ask.await_args.args[2]["retrieval_chains"]), 1)
 
     async def test_exact_reference_channel_is_auditable(self):
         table = EvidenceSpan(id="table", paper_id="p1", version="1", source_level="full_text",

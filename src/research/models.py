@@ -110,7 +110,7 @@ READING_LENSES = (
 class EvidenceRequirement(Record):
     kind: Literal[
         "problem", "claim", "method_step", "equation", "assumption", "dataset",
-        "baseline", "metric", "budget", "hardware", "result", "ablation",
+        "baseline", "metric", "budget", "hardware", "precision", "result", "ablation",
         "negative_result", "limitation", "implementation", "figure", "table",
     ]
     required: bool = True
@@ -151,7 +151,16 @@ class SubqueryCoverage(Record):
     missing_requirements: list[str] = Field(default_factory=list)
 
 
+class RetrievalHop(Record):
+    source_id: str
+    target_id: str
+    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference"]
+    confidence: float = Field(ge=0, le=1)
+    provenance: str
+
+
 class EvidenceCandidateTrace(Record):
+    retrieval_path: list[RetrievalHop] = Field(default_factory=list, max_length=2)
     evidence_id: str
     retrieval_channels: list[Literal["dense", "gap_dense", "lexical", "section", "exact_reference", "requirement", "relation", "fallback"]]
     fused_score: float = Field(ge=0)
@@ -347,7 +356,14 @@ class Challenge(Record):
     evidence_ids: list[str] = Field(min_length=1)
 
 
+class ChainCheck(Record):
+    evidence_ids: list[str] = Field(min_length=3, max_length=3)
+    status: Literal["consistent", "inconsistent", "unknown"]
+    reason: str = Field(min_length=1)
+
+
 class VerificationDraft(Record):
+    chain_checks: list[ChainCheck] = Field(default_factory=list)
     visual_observations: list[VisualObservation] = Field(default_factory=list, max_length=20)
     challenges: list[Challenge] = Field(default_factory=list, max_length=5)
     verdict: Literal["verified", "qualified", "insufficient_evidence", "contradicted", "needs_human_review"]

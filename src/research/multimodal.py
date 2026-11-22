@@ -68,7 +68,9 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         caption_labels = caption_labels_by_evidence.get(span.id, set())
         linked = referenced | caption_labels
         if span.modality == "visual_transcription" and span.page_start:
-            linked |= labels_by_page.get(span.page_start, set())
+            page_labels = labels_by_page.get(span.page_start, set())
+            if not linked and len(page_labels) == 1:
+                linked |= page_labels
         view_type = "ocr" if span.modality == "visual_transcription" else (
             "caption" if caption_labels else
             "nearby_discussion" if linked else span.view_type)

@@ -42,6 +42,12 @@ class MultimodalObjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(views["discussion"].view_type, "nearby_discussion")
         self.assertTrue(all(obj.id in span.visual_object_ids for span in updated))
 
+    def test_unlabelled_transcription_on_mixed_page_stays_page_scoped(self):
+        updated, objects = build_multimodal_catalog(self.evidence(),
+            [{"page": 3, "captions": ["figure:2", "table:1"]}])
+        self.assertEqual(updated[-1].visual_object_ids, [])
+        self.assertTrue(all(not obj.ocr_evidence_ids for obj in objects))
+
     async def test_packet_expands_from_text_reference_to_other_object_views(self):
         updated, _ = build_multimodal_catalog(self.evidence(),
             [{"page": 3, "captions": ["figure:2"]}])
