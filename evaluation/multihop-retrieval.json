@@ -1,0 +1,9 @@
+[
+  {"id":"numbered-table","bridge":"Table 2: Timings","requirement":"precision","candidate":"For Table 2 we used FP16.","distractor":"For Table 20 we used FP16.","relation":"explicit_reference"},
+  {"id":"experiment-configuration","bridge":"Experiment 2: Timings","requirement":"precision","candidate":"Exp. 2 configuration: FP16.","distractor":"Experiment 20 setup: FP16.","relation":"experiment_setting_of"},
+  {"id":"bilingual-experiment","bridge":"实验 3 的延迟","requirement":"hardware","candidate":"Experiment 3 setup: A100 GPU.","distractor":"Experiment 30 setup: A100 GPU.","relation":"experiment_setting_of"},
+  {"id":"ablation","bridge":"Experiment 2: Timings","requirement":"ablation","candidate":"Experiment 2 ablation: remove router.","distractor":"Experiment 20 ablation: remove router.","relation":"ablation_of"},
+  {"id":"limitation","bridge":"实验 2 的延迟","requirement":"limitation","candidate":"实验 2 局限：长序列失败。","distractor":"实验 20 局限：短序列失败。","relation":"limitation_of"},
+  {"id":"same-table-different-experiment","bridge":"Table 2. Experiment 2.","requirement":"precision","candidate":"Experiment 1 setup: FP16 in Table 2.","distractor":"Experiment 3 setup: BF16 in Table 2.","relation":null},
+  {"id":"ambiguous-experiments","bridge":"Experiment 2 and Experiment 3.","requirement":"precision","candidate":"Experiment 2 setup: FP16.","distractor":"Experiment 3 setup: FP16.","relation":null}
+]

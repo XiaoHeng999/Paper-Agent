@@ -111,6 +111,18 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.repair_request)
         self.assertEqual(len(tasks.ask.await_args.args[2]["retrieval_chains"]), 1)
 
+        inferred = claim.model_copy(update={"attribution": "system_inference", "evidence_ids": ["setup"],
+            "subquery_ids": [packet.subquery_id]})
+        with patch("src.research.visual.verification_images", return_value=([], [], [])):
+            checked = await verify(tasks, inferred, scope, evidence_packets=[packet])
+        self.assertEqual(checked.retrieval_paths, [path])
+        self.assertTrue({"seed", "bridge", "setup"} <= set(checked.inspected_evidence_ids))
+
+    async def test_controlled_multihop_cases(self):
+        from evaluation.multihop_retrieval import evaluate
+        metrics = await evaluate()
+        self.assertTrue(all(case["passed"] for case in metrics["cases"]), metrics)
+
     async def test_exact_reference_channel_is_auditable(self):
         table = EvidenceSpan(id="table", paper_id="p1", version="1", source_level="full_text",
             text="Table 2 reports latency and accuracy results.", section="Results")

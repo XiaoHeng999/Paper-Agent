@@ -154,7 +154,7 @@ class SubqueryCoverage(Record):
 class RetrievalHop(Record):
     source_id: str
     target_id: str
-    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference"]
+    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference", "experiment_setting_of", "ablation_of", "limitation_of"]
     confidence: float = Field(ge=0, le=1)
     provenance: str
 
@@ -402,6 +402,7 @@ class VerificationDraft(Record):
 
 
 class VerificationResult(VerificationDraft):
+    retrieval_paths: list[list[RetrievalHop]] = Field(default_factory=list)
     visual_pages: list[dict] = Field(default_factory=list)
     target_id: str
     target_version: str

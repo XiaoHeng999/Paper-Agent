@@ -193,10 +193,12 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
         for packet in evidence_packets:
             for item in packet.candidate_trace:
                 path = item.retrieval_path
-                if len(path) == 2 and {path[0].source_id, item.evidence_id} <= cited:
+                inferred_endpoint = (isinstance(target, Claim) and target.attribution == "system_inference"
+                    and packet.subquery_id in target.subquery_ids and item.evidence_id in packet.evidence_ids)
+                if len(path) == 2 and item.evidence_id in cited and (path[0].source_id in cited or inferred_endpoint):
                     key = (path[0].source_id, path[0].target_id, item.evidence_id)
                     chains[key] = [hop.model_dump() for hop in path]
-        core_ids = list(dict.fromkeys([*target.evidence_ids, *(key[1] for key in chains)]))
+        core_ids = list(dict.fromkeys([*target.evidence_ids, *(eid for key in chains for eid in key)]))
         raw, omitted = await evidence.adversarial(core_ids,
             target.statement if hasattr(target, "statement") else target.rationale, tasks.options.context_chars, tasks)
         levels = sorted({x.source_level for x in raw})
@@ -330,7 +332,7 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
     except (ValueError, RuntimeError, TimeoutError) as exc:
         reason = str(exc).strip() or ("语义核查超时，未完成本次判断" if isinstance(exc, TimeoutError) else f"语义核查失败：{type(exc).__name__}")
         draft = VerificationDraft(verdict="insufficient_evidence", reason=reason, evidence_ids=[], unchecked=["本次语义核查未完成"])
-    return VerificationResult(**draft.model_dump(), visual_pages=visual_context, target_id=target.id, target_version=target.version, scope=scope, source_levels=levels, inspected_evidence_ids=[x.id for x in raw], omitted_evidence_ids=omitted)
+    return VerificationResult(**draft.model_dump(), retrieval_paths=list(chains.values()), visual_pages=visual_context, target_id=target.id, target_version=target.version, scope=scope, source_levels=levels, inspected_evidence_ids=[x.id for x in raw], omitted_evidence_ids=omitted)
 
 
 async def compare(tasks: ModelTasks, question: str, claims: list[Claim], evidence: ScopedEvidence, feedback: str = "") -> list[AnalysisRelation]:

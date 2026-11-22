@@ -55,6 +55,15 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
             lines.append("结构化研究条件：" + "；".join(f"{key}={value}" for key, value in details.items()))
         if result:
             lines.append(result.reason)
+            for path in result.retrieval_paths:
+                for hop in path:
+                    lines.append(f"- [{hop.source_id}] → {hop.relation} → [{hop.target_id}]（{hop.provenance}）")
+            for chain in result.chain_checks:
+                lines.append(f"链路核查（{' → '.join(chain.evidence_ids)}）{chain.status}，{chain.reason}")
+            if result.precision_comparison:
+                comparison = result.precision_comparison
+                for name, side in (("方法", comparison.method), ("基线", comparison.baseline)):
+                    lines.append(f"{name}精度 {side.precision} [{side.evidence_id}]" if side else f"{name}精度待确认")
             for label, check in (("忠实转述", result.fidelity), ("实验支持充分性", result.experimental_support), ("内部反证", result.counterevidence)):
                 lines.append(f"{label}：{check.status}；{check.reason}")
             for observation in result.visual_observations:
@@ -68,6 +77,9 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
         cited_ids = list(claim.evidence_ids)
         if result:
             cited_ids.extend(result.evidence_ids)
+            inspected = set(result.inspected_evidence_ids)
+            cited_ids.extend(eid for path in result.retrieval_paths for hop in path
+                for eid in (hop.source_id, hop.target_id) if eid in inspected)
             for check in (result.fidelity, result.experimental_support, result.counterevidence):
                 cited_ids.extend(check.evidence_ids)
             for dimension in result.dimensions:

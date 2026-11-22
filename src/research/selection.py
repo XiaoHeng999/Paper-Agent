@@ -192,6 +192,37 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
         for evidence_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:40]], paths
 
 
+_EXPERIMENT = re.compile(
+    r"(?<![a-z0-9])(?:experiment|exp\.|实验)\s*#?\s*([a-z]?\d+(?:[.-]\d+)*[a-z]?)(?![a-z0-9])", re.I)
+_SETUP = re.compile(r"\s*(?:[:：—-]\s*)?(setup|configuration|settings?|ablation|limitations?|设置|配置|消融|局限)", re.I)
+
+
+def _gap_hop(bridge, span, experiments, labels, requirements):
+    mentions = list(_EXPERIMENT.finditer(span.text))
+    target_experiments = {m[1].casefold() for m in mentions}
+    if experiments and target_experiments:
+        if len(experiments) != 1 or experiments != target_experiments:
+            return None
+        for mention in mentions:
+            cue = _SETUP.match(span.text, mention.end())
+            if cue:
+                marker = cue[1].casefold()
+                relation = ("ablation_of" if marker in {"ablation", "消融"} else "limitation_of"
+                    if marker.startswith("limitation") or marker == "局限" else "experiment_setting_of")
+                if relation == "ablation_of" and "ablation" not in requirements:
+                    continue
+                if relation == "limitation_of" and "limitation" not in requirements:
+                    continue
+                return RetrievalHop(source_id=bridge.id, target_id=span.id, relation=relation,
+                    confidence=1, provenance=span.text[mention.start():cue.end()])
+    shared = labels.intersection(find_object_labels(span.text))
+    if len(shared) == 1:
+        label, _ = next(iter(shared))
+        return RetrievalHop(source_id=bridge.id, target_id=span.id, relation="explicit_reference",
+            confidence=1, provenance=f"shared explicit reference {label}")
+    return None
+
+
 def _expand_reference_gaps(scope, packet, ranked, paths):
     gaps = set(packet.missing_requirements) & {
         "hardware", "precision", "baseline_precision", "budget", "implementation", "ablation", "limitation"}
@@ -206,25 +237,23 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
         if bridge.crop_version:
             continue
         labels = set(find_object_labels(bridge.text))
-        if not labels:
+        experiments = {m[1].casefold() for m in _EXPERIMENT.finditer(bridge.text)}
+        if not (labels or experiments):
             continue
         for span in scope.spans.values():
             if span.crop_version or span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
                 continue
             if span.id == paths[bridge_id][0].source_id or not _matched_requirements(span, gaps):
                 continue
-            shared = labels.intersection(find_object_labels(span.text))
-            if len(shared) == 1:
-                label, _ = next(iter(shared))
-                hits[span.id] = (span, bridge_id, label)
+            hop = _gap_hop(bridge, span, experiments, labels, gaps)
+            if hop:
+                hits[span.id] = (span, bridge_id, hop)
                 if len(hits) == 4:
                     break
         if len(hits) == 4:
             break
-    for span, bridge_id, label in hits.values():
-        paths[span.id] = [*paths[bridge_id], RetrievalHop(source_id=bridge_id,
-            target_id=span.id, relation="explicit_reference", confidence=1,
-            provenance=f"shared explicit reference {label}")]
+    for span, bridge_id, hop in hits.values():
+        paths[span.id] = [*paths[bridge_id], hop]
         _, score, channels = entries.get(span.id, (span, 0, []))
         entries[span.id] = (span, max(score, entries[bridge_id][1] * 0.72),
             sorted(set(channels) | {"relation"}))
