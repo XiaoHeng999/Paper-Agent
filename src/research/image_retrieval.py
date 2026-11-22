@@ -36,7 +36,8 @@ def visual_gap(query, packet, scope):
 class ClipIndex:
     def __init__(self):
         directory = os.environ.get("PAPER_AGENT_CLIP_DIR")
-        self.directory = Path(directory) if directory else None
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        self.directory = Path(directory) if directory else cache / "paper-agent" / "clip-vit-base-patch32" / _REVISION.split("@")[1]
         self.lock = asyncio.Lock()
         self.vectors = {}
         self.sessions = None
@@ -44,13 +45,13 @@ class ClipIndex:
         self.error = ""
 
     def signature(self):
-        paths = [self.directory / name for name in _FILES] if self.directory else []
+        paths = [self.directory / name for name in _FILES]
         return [_REVISION, [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in paths if p.is_file()]]
 
     def _load(self):
         import onnxruntime as ort
         from tokenizers import Tokenizer
-        if not self.directory:
+        if not self.directory.is_dir():
             raise ValueError("请配置 PAPER_AGENT_CLIP_DIR 指向本地 CLIP 模型目录")
         for name, digest in _FILES.items():
             with (self.directory / name).open("rb") as source:
