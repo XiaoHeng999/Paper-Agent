@@ -158,7 +158,7 @@ class SubqueryCoverage(Record):
 class RetrievalHop(Record):
     source_id: str
     target_id: str
-    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference", "experiment_setting_of", "ablation_of", "limitation_of"]
+    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference", "definition_of", "experiment_setting_of", "ablation_of", "limitation_of"]
     confidence: float = Field(ge=0, le=1)
     provenance: str
 

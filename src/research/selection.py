@@ -152,6 +152,27 @@ async def refine_packets_with_model(tasks, scope, packets: list[EvidencePacket])
         return packets
 
 
+_ACRONYM = re.compile(r"\b[A-Z]{2,8}\b")
+_DEFINITION = re.compile(r"((?:[A-Za-z]+[ -]){2,8})\(([A-Z]{2,8})\)")
+
+
+def _definition_index(spans):
+    """Accept explicit expansions whose word initials spell the acronym."""
+    definitions = defaultdict(dict)
+    for span in spans:
+        if span.modality != "text" or span.table_cell:
+            continue
+        for match in _DEFINITION.finditer(span.text):
+            alias = match[2]
+            words = re.findall(r"[A-Za-z]+", match[1])[-len(alias):]
+            if "".join(word[0].upper() for word in words) != alias:
+                continue
+            name = " ".join(words)
+            definitions[(span.paper_id, alias)].setdefault(name.casefold(),
+                (span.id, f"{name} ({alias})"))
+    return {key: next(iter(names.values())) for key, names in definitions.items() if len(names) == 1}
+
+
 async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     query = " ".join([subquery.question, *subquery.retrieval_queries])
     channels = {}
@@ -176,9 +197,15 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     seed_ids = [item[0] for item in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:4]]
     paths = {}
     seed_scores = dict(scores)
+    definitions = _definition_index(scope.spans.values())
     for seed_id in seed_ids:
         seed = scope.spans[seed_id]
-        related = []
+        definition_hops = {}
+        for alias in _ACRONYM.findall(seed.text):
+            definition = definitions.get((seed.paper_id, alias))
+            if definition and definition[0] != seed.id:
+                definition_hops[definition[0]] = definition[1]
+        related = list(definition_hops)
         if seed.visual_object_ids:
             related.extend(span.id for span in scope.spans.values() if span.id != seed.id
                 and set(seed.visual_object_ids) & set(span.visual_object_ids))
@@ -196,6 +223,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
             relation = "same_object" if shared else _relation(seed, target)
             provenance = ", ".join(shared) if shared else (
                 seed.parent_id if relation == "same_parent" else "previous_id/next_id")
+            if related_id in definition_hops:
+                relation, provenance = "definition_of", definition_hops[related_id]
             paths.setdefault(related_id, [RetrievalHop(source_id=seed.id, target_id=related_id,
                 relation=relation, confidence=1, provenance=provenance)])
             scores[related_id] = max(scores[related_id], seed_scores[seed_id] * 0.72)

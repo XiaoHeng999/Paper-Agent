@@ -123,6 +123,26 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         metrics = await evaluate()
         self.assertTrue(all(case["passed"] for case in metrics["cases"]), metrics)
 
+    async def test_cross_page_acronym_requires_one_explicit_expansion(self):
+        seed = EvidenceSpan(id="seed", paper_id="p1", version="v", source_level="full_text",
+            page_start=5, text="DSR reduces latency.")
+        definition = seed.model_copy(update={"id": "definition", "page_start": 2,
+            "text": "We introduce the Dynamic Sparse Router (DSR)."})
+        query = subquery(["method_step"], "How does DSR reduce latency?")
+        scope = ScopedEvidence([seed, definition], {"p1"})
+        scope.search = AsyncMock(return_value=[seed])
+        packet, = await build_evidence_packets(scope, plan(query), None)
+        trace = {item.evidence_id: item for item in packet.candidate_trace}
+        hop, = trace["definition"].retrieval_path
+        self.assertEqual(hop.relation, "definition_of")
+        self.assertIn("Dynamic Sparse Router (DSR)", hop.provenance)
+
+        ambiguous = definition.model_copy(update={"id": "ambiguous", "text": "Dense Signal Reader (DSR)."})
+        scope = ScopedEvidence([seed, definition, ambiguous], {"p1"})
+        scope.search = AsyncMock(return_value=[seed])
+        packet, = await build_evidence_packets(scope, plan(query), None)
+        self.assertFalse(any(h.relation == "definition_of" for t in packet.candidate_trace for h in t.retrieval_path))
+
     async def test_optional_image_channel_is_scoped_and_fails_back_to_text(self):
         oid = "p1:visual-object:figure:1"
         span = EvidenceSpan(id="caption", paper_id="p1", version="1", text="Figure 1: Results.",
