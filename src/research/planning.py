@@ -152,8 +152,10 @@ def coverage_for_plan(plan: ReadingPlan, claims: list[Claim], packets: list[Evid
 
 def _subquery(paper_id, source, lens, question, priority):
     _, requirements, retrieval = _LENS_SPECS[lens]
-    if re.search(r"fp(?:16|32|64|8)|bf16|int[48]|量化|低精度|混合精度|mixed precision|lower precision", question, re.I):
+    if re.search(r"fp(?:16|32|64|8)|bf16|int[48]|量化|数值精度|低精度|混合精度|基线精度|mixed precision|lower precision|numerical precision|baseline precision", question, re.I):
         requirements = (*requirements, "precision")
+        if re.search(r"基线|对比|加速|优势|速度|baseline|speedup|faster|latency", question, re.I):
+            requirements = (*requirements, "baseline_precision")
     value = [paper_id, source, lens, question]
     return ReadingSubquery(id=f"rq:{version_of(value)}", source=source, lens=lens,
         question=question, retrieval_queries=[question, retrieval], priority=priority,

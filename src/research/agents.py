@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import time
 from typing import Any
 
@@ -81,6 +82,7 @@ class ModelTasks:
             usage = normalize_token_usage(getattr(response, "usage", None))
             for key in self.usage:
                 self.usage[key] += usage[key]
+                stat[key] = stat.get(key, 0) + usage[key]
             if self.usage_callback:
                 self.usage_callback(role, usage)
             if self.cancellation:
@@ -200,7 +202,12 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
         levels = sorted({x.source_level for x in raw})
         from .visual import verification_images
         images, visual_context, visual_missing = verification_images(tasks, raw, target.model_copy(update={"evidence_ids": core_ids}))
-        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+        precision_required = isinstance(target, Claim) and target.kind == "result" and any(
+            packet.subquery_id in target.subquery_ids and
+            "baseline_precision" in [*packet.covered_requirements, *packet.missing_requirements]
+            for packet in evidence_packets)
+        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+            "precision_comparison_required": precision_required,
             "retrieval_chains": list(chains.values()),
             "visual_pages": visual_context, "visual_unchecked": visual_missing,
             "scope": scope, "allowed_paper_ids": sorted(evidence.allowed),
@@ -226,7 +233,10 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                 draft.repair_request = draft.repair_request or '根据原图中的反证修正判断'
         # Expanded context is not automatically a visual dependency. Once a verifier
         # actually cites it, however, its charts must not bypass original-page checks.
-        cited_ids = list(dict.fromkeys([*target.evidence_ids, *draft.evidence_ids,
+        precision_sources = [side.evidence_id for side in (
+            draft.precision_comparison.method, draft.precision_comparison.baseline) if side
+        ] if draft.precision_comparison else []
+        cited_ids = list(dict.fromkeys([*target.evidence_ids, *draft.evidence_ids, *precision_sources,
             *(eid for facet in (draft.fidelity, draft.experimental_support, draft.counterevidence) for eid in facet.evidence_ids)]))
         cited_target = target.model_copy(update={'evidence_ids': cited_ids})
         _, cited_pages, cited_missing = verification_images(tasks, raw, cited_target)
@@ -285,6 +295,22 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
         if draft.verdict == "verified" and (draft.counterevidence.status == "supported" or draft.experimental_support.status == "contradicted"):
             draft.verdict = "qualified"
             draft.repair_request = draft.repair_request or "结合已定位的反证或实验不足，收窄当前判断"
+        comparison = draft.precision_comparison
+        if comparison:
+            by_id = {span.id: span.text.casefold() for span in raw}
+            for side in (comparison.method, comparison.baseline):
+                if side and (side.quote.casefold() not in by_id.get(side.evidence_id, "")
+                        or side.precision.casefold() not in side.quote.casefold()
+                        or not re.fullmatch(r"(?:b?float|b?fp|int|uint)\s*[- ]?\d+|(?:mixed|half|single|double) precision|混合精度|半精度|单精度|双精度",
+                            side.precision.strip(), re.I)):
+                    raise ValueError("精度比较缺少本次读取的原文引句")
+        if precision_required and not (comparison and comparison.method and comparison.baseline
+                and comparison.same_experiment == "confirmed"):
+            draft.unchecked.append("当前证据尚未确认同一实验中方法与基线各自的数值精度")
+            if target.attribution == "system_inference" and draft.verdict == "verified":
+                draft.verdict = "qualified"
+                draft.reason += "；精度差异对结果的影响尚未确定"
+                draft.repair_request = "定位同一实验中方法及基线的精度设置，或收窄归因"
         if unresolved:
             draft.unchecked.extend("实验配置未对齐：" + " → ".join(key) for key in unresolved)
             if draft.verdict == "verified":

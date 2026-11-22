@@ -14,6 +14,9 @@ from contextlib import closing
 from pathlib import Path
 
 from pydantic import Field
+from .context import ScopedEvidence
+from .planning import build_reading_plan
+from .selection import build_evidence_packets
 from .multimodal import find_object_labels
 from .models import EvidenceSpan, Record, version_of
 
@@ -77,7 +80,40 @@ def _crop_png(page, bbox):
         return output.getvalue()
 
 
-def inspect_pdf(path, limit, query=""):
+async def _visual_gaps(plan, evidence):
+    """Use the native-text packet before spending any visual-model budget."""
+    questions = [q for q in plan.subqueries if q.source == "user" and not labels(q.question)
+        and (any(r.kind == "precision" for r in q.evidence_requirements)
+             or re.search(r"hardware|gpu|cpu|a100|硬件|显卡", q.question, re.I))]
+    if not questions:
+        return []
+    scope = ScopedEvidence(evidence, {plan.paper_id})
+    packets = await build_evidence_packets(scope, plan.model_copy(update={"subqueries": questions}), None)
+    gaps = []
+    for packet in packets:
+        relevant = {"precision", "baseline_precision"}
+        if re.search(r"hardware|gpu|cpu|a100|硬件|显卡", packet.question, re.I):
+            relevant.add("hardware")
+        missing = sorted(set(packet.missing_requirements) & relevant)
+        if missing:
+            gaps.append({"subquery_id": packet.subquery_id, "question": packet.question,
+                "requirements": missing, "references": sorted({label for span in scope.read(packet.evidence_ids)
+                    for label in labels(span.text)})})
+    return gaps
+
+
+def _gap_score(label, caption, gap):
+    score = 3 if label in gap["references"] else 0
+    topics = (r"latency|speedup|speed|throughput|faster|加速|速度|吞吐|延迟",
+              r"precision|quantiz|fp16|bf16|int8|精度|量化",
+              r"hardware|gpu|cpu|显卡|硬件", r"baseline|comparison|基线|对比")
+    for pattern in topics:
+        if re.search(pattern, gap["question"], re.I) and re.search(pattern, caption, re.I):
+            score += 2
+    return score
+
+
+def inspect_pdf(path, limit, query="", gaps=()):
     import pypdfium2 as pdfium
     from pypdfium2 import raw
     path = Path(path)
@@ -111,16 +147,27 @@ def inspect_pdf(path, limit, query=""):
                             layout = {}
                 # Full-page raster plus a searchable header is still a scan.
                 scanned = len(text.strip()) < 40 or image_area >= width * height * .6
+                gap_candidates = {}
                 captions = set(layout)
                 for line in text.splitlines():
                     if re.match(r"(?i)^\s*(fig(?:ure)?\.?|table|图|表)\s*\d+", line):
                         captions.update(labels(line))
+                    if not gaps or not layout or not line.strip().casefold().startswith(("fig", "table", "图", "表")):
+                        continue
+                    refs = find_object_labels(line)
+                    if refs and refs[0][0] in layout:
+                        label = refs[0][0]
+                        for gap in gaps:
+                            score = _gap_score(label, line, gap)
+                            if score > gap_candidates.get(label, {}).get("score", 0):
+                                gap_candidates[label] = {"score": score, "subquery_id": gap["subquery_id"],
+                                    "requirements": gap["requirements"]}
                 if not scanned and not image_area and not VISUAL.search(text):
                     continue
                 candidates.append({"page": index+1, "scanned": scanned, "captions": sorted(captions), "visual_content": bool(scanned or image_area or captions),
                     "source_version": source_hash, "page_bbox": list(page.get_bbox()),
-                    "object_bboxes": layout,
-                    "priority": (int(bool(captions & wanted)), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
+                    "object_bboxes": layout, "gap_candidates": gap_candidates,
+                    "priority": (int(bool(captions & wanted)), max((v["score"] for v in gap_candidates.values()), default=0), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
         ordered = sorted(candidates, key=lambda p: (tuple(-x for x in p['priority']), p['page']))
         for metadata in ordered[:limit]:
             with closing(document[metadata['page']-1]) as page:
@@ -141,7 +188,7 @@ def render_candidates(path, limit):
     return pages, omitted
 
 
-async def prepare_visual(tasks, item, evidence):
+async def prepare_visual(tasks, item, evidence, reading_plan=None):
     paper = item.get("paper", {})
     paper_id = str(paper.get("paperId") or paper.get("id") or "")
     path = item.get("full_text", {}).get("source_path")
@@ -155,7 +202,11 @@ async def prepare_visual(tasks, item, evidence):
     try:
         remaining_pages = max(0, 24 - len(tasks.visual_pages))
         fair_limit = max(1, remaining_pages // max(1, getattr(tasks, "remaining_visual_papers", 1))) if remaining_pages else 0
-        pages, omitted, catalog = await asyncio.to_thread(inspect_pdf, path, min(tasks.options.visual_page_limit, fair_limit), getattr(tasks, "question", ""))
+        question = getattr(tasks, "question", "")
+        plan = reading_plan or build_reading_plan(question, paper_id, paper.get("title") or paper_id)
+        gaps = await _visual_gaps(plan, evidence)
+        audit["visual_gaps"] = gaps
+        pages, omitted, catalog = await asyncio.to_thread(inspect_pdf, path, min(tasks.options.visual_page_limit, fair_limit), question, gaps)
         tasks.visual_catalog[paper_id] = catalog
         audit.update(status="prepared", omitted_pages=omitted)
         if omitted:
@@ -176,22 +227,25 @@ async def prepare_visual(tasks, item, evidence):
             "next_id": remapped.get(span.next_id, span.next_id),
         }) for span in updated]
         additions = []
-        crop_budget = 2
-        wanted = labels(getattr(tasks, "question", ""))
+        wanted = labels(question)
+        ranked = sorted((label not in wanted, -page["gap_candidates"].get(label, {}).get("score", 0),
+            page["page"], label) for page in pages for label in page["object_bboxes"]
+            if label in wanted or label in page["gap_candidates"])
+        chosen = {(number, label) for _, _, number, label in ranked[:2]}
         for page in pages:
             metadata = {k: v for k, v in page.items() if k != "url"}
             audit["pages"].append(metadata)
             tasks.visual_pages[(paper_id, page["page"])] = page
             if not page["scanned"]:
-                for label in sorted(wanted.intersection(page.get("object_bboxes", {}))):
-                    if not crop_budget:
-                        break
-                    crop_budget -= 1
+                for number, label in sorted(chosen):
+                    if number != page["page"]:
+                        continue
                     try:
                         spans, reused = await _transcribe_crop(tasks, paper_id, page, label)
                         additions.extend(spans)
                         metadata.setdefault("crop_transcriptions", []).append({
-                            "label": label, "crop_version": spans[0].crop_version, "reused": reused})
+                            "label": label, "trigger": "explicit_reference" if label in wanted else "requirement_gap",
+                            "crop_version": spans[0].crop_version, "reused": reused})
                     except Exception as exc:
                         audit["warnings"].append(f"{paper_id} 第 {page['page']} 页 {label} 裁剪转录未完成：{exc}")
                 continue

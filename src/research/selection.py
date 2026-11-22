@@ -194,7 +194,7 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
 
 def _expand_reference_gaps(scope, packet, ranked, paths):
     gaps = set(packet.missing_requirements) & {
-        "hardware", "precision", "budget", "implementation", "ablation", "limitation"}
+        "hardware", "precision", "baseline_precision", "budget", "implementation", "ablation", "limitation"}
     if not gaps:
         return []
     entries = {span.id: (span, score, channels) for span, score, channels in ranked}
@@ -339,7 +339,12 @@ def _apply_model_judgments(packets, nodes, increments, anchors):
 
 def _matched_requirements(span, required):
     text = f"{span.section} {span.text}".casefold()
-    return [kind for kind in required if any(term in text for term in _REQUIREMENT_TERMS.get(kind, ()))]
+    matched = [kind for kind in required if any(term in text for term in _REQUIREMENT_TERMS.get(kind, ()))]
+    if "baseline_precision" in required and re.search(
+            r"(?:\bbaseline(?: precision)?|基线(?:精度)?)\s*(?:uses?|used|runs? (?:in|at)|was|is|采用|使用|为)?"
+            r"\s*[:：|=]?\s*(?:fp(?:8|16|32|64)|bf16|int[48])(?![a-z0-9])", span.text, re.I):
+        matched.append("baseline_precision")
+    return matched
 
 
 def _rank_lexical(spans, query, limit):

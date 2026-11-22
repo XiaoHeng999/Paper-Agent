@@ -110,7 +110,7 @@ READING_LENSES = (
 class EvidenceRequirement(Record):
     kind: Literal[
         "problem", "claim", "method_step", "equation", "assumption", "dataset",
-        "baseline", "metric", "budget", "hardware", "precision", "result", "ablation",
+        "baseline", "metric", "budget", "hardware", "precision", "baseline_precision", "result", "ablation",
         "negative_result", "limitation", "implementation", "figure", "table",
     ]
     required: bool = True
@@ -364,7 +364,20 @@ class ChainCheck(Record):
     reason: str = Field(min_length=1)
 
 
+class PrecisionEvidence(Record):
+    evidence_id: str
+    quote: str = Field(min_length=1)
+    precision: str = Field(min_length=1)
+
+
+class PrecisionComparison(Record):
+    method: PrecisionEvidence | None = None
+    baseline: PrecisionEvidence | None = None
+    same_experiment: Literal["confirmed", "different", "unknown"] = "unknown"
+
+
 class VerificationDraft(Record):
+    precision_comparison: PrecisionComparison | None = None
     chain_checks: list[ChainCheck] = Field(default_factory=list)
     visual_observations: list[VisualObservation] = Field(default_factory=list, max_length=20)
     challenges: list[Challenge] = Field(default_factory=list, max_length=5)

@@ -46,6 +46,23 @@ def add_header(path, text, index=0):
         writer.write(output)
 
 
+def two_figure_pdf(path):
+    scanned_pdf(path)
+    add_header(path, "Native text")
+    writer = PdfWriter(clone_from=str(path))
+    page = writer.pages[0]
+    name = next(iter(page["/Resources"]["/XObject"]))
+    stream = DecodedStreamObject()
+    stream.set_data(f"""q 160 0 0 100 40 470 cm {name} Do Q
+        BT /HeaderFont 12 Tf 40 450 Td (Figure 1: First experiment architecture) Tj ET
+        q 200 0 0 80 40 240 cm {name} Do Q
+        BT /HeaderFont 12 Tf 40 220 Td (Figure 2: Second experiment latency) Tj ET""".encode())
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    with path.open("wb") as out:
+        writer.write(out)
+    return writer, stream
+
+
 def check(target, **kwargs):
     return VerificationResult(target_id=target.id, target_version=target.version, verdict='verified', reason='source supports', evidence_ids=target.evidence_ids,
         scope='paper' if isinstance(target, Claim) else 'cross_paper', source_levels=['full_text'],
@@ -112,19 +129,7 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_query_transcribes_only_matching_raster_and_verifies_page(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mixed.pdf"
-            scanned_pdf(path)
-            add_header(path, "Native text")
-            writer = PdfWriter(clone_from=str(path))
-            page = writer.pages[0]
-            name = next(iter(page["/Resources"]["/XObject"]))
-            stream = DecodedStreamObject()
-            stream.set_data(f"""q 160 0 0 100 40 470 cm {name} Do Q
-                BT /HeaderFont 12 Tf 40 450 Td (Figure 1: First experiment latency) Tj ET
-                q 200 0 0 80 40 240 cm {name} Do Q
-                BT /HeaderFont 12 Tf 40 220 Td (Figure 2: Second experiment latency) Tj ET""".encode())
-            page[NameObject("/Contents")] = writer._add_object(stream)
-            with path.open("wb") as out:
-                writer.write(out)
+            writer, stream = two_figure_pdf(path)
             paper = item()
             paper["full_text"]["source_path"] = str(path)
             model = VisualModel()
@@ -161,6 +166,54 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
                 writer.write(out)
             _, _, catalog = inspect_pdf(path, 1)
             self.assertEqual(catalog[0]["object_bboxes"], {})
+
+    async def test_precision_gap_selects_latency_crop_without_a_figure_number(self):
+        from src.research.planning import build_reading_plan
+        from src.research.selection import build_evidence_packets
+        from src.research.visual import Transcription
+        from src.research.models import VerificationDraft
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mixed.pdf"
+            two_figure_pdf(path)
+            paper = item()
+            paper["full_text"]["source_path"] = str(path)
+            tasks = ModelTasks(VisualModel(), ResearchOptions())
+            tasks.question = "论文的加速是否来自更低精度？"
+            plan = build_reading_plan(tasks.question, "p1", "Latency experiment")
+            tasks.ask = AsyncMock(return_value=Transcription(readable=True,
+                text="Method: FP16, 10 ms. Baseline: 14 ms."))
+            evidence, audit = await prepare_visual(tasks, paper, [], plan)
+            tasks.ask.assert_awaited_once()
+            self.assertEqual(tasks.ask.await_args.args[2]["object_label"], "figure:2")
+            self.assertEqual(audit["pages"][0]["crop_transcriptions"][0]["trigger"], "requirement_gap")
+            scope = ScopedEvidence(evidence, {"p1"})
+            packets = await build_evidence_packets(scope, plan, None)
+            packet = next(p for p in packets if p.question == plan.user_questions[0])
+            self.assertIn("precision", packet.covered_requirements)
+            self.assertIn("baseline_precision", packet.missing_requirements)
+            eid = evidence[0].id
+            target = Claim(id="c", version="v", paper_id="p1", kind="result",
+                attribution="system_inference", statement="The speedup comes from precision.",
+                evidence_ids=[eid], subquery_ids=[packet.subquery_id])
+            tasks.ask = AsyncMock(return_value=VerificationDraft(verdict="verified", reason="reported",
+                evidence_ids=[eid], fidelity={"status": "supported", "evidence_ids": [eid]},
+                experimental_support={"status": "supported", "evidence_ids": [eid]},
+                visual_observations=[{"paper_id": "p1", "page": 1, "image_version": evidence[0].image_version,
+                    "locator": "Figure 2", "observation": "method row", "status": "supports"}]))
+            result = await verify(tasks, target, scope, evidence_packets=packets)
+            self.assertTrue(tasks.ask.await_args.args[2]["precision_comparison_required"])
+            self.assertEqual(result.verdict, "qualified")
+            self.assertIn("精度", result.repair_request)
+
+            # When both settings are explicit in native text, skip the visual model.
+            native = EvidenceSpan(id="native", paper_id="p1", version="v", source_level="full_text",
+                text="Method uses FP16. Baseline uses FP32. Latency result improves.")
+            tasks.ask.reset_mock()
+            _, audit = await prepare_visual(tasks, paper, [native], plan)
+            self.assertEqual(audit["visual_gaps"], [])
+            tasks.ask.assert_not_awaited()
+
 
     async def test_mixed_scan_with_long_header_is_transcribed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -155,7 +155,9 @@ def run_research_node():
                 evidence = []
                 load_error = f"原文准备失败，未生成判断：{exc}"
             document_before = await asyncio.to_thread(document_version, item)
-            evidence, visual_audit = await prepare_visual(tasks, item, evidence)
+            reading_plans[paper_id] = build_reading_plan(request.topic, paper_id,
+                str(paper.get('title') or paper_id), str(paper.get('abstract') or ''))
+            evidence, visual_audit = await prepare_visual(tasks, item, evidence, reading_plans[paper_id])
             evidence, objects = build_multimodal_catalog(evidence,
                 tasks.visual_catalog.get(paper_id, []), tasks.visual_pages)
             visual_objects[paper_id] = objects
@@ -168,8 +170,6 @@ def run_research_node():
             visual_audits.append(visual_audit)
             all_evidence.extend(evidence)
             paper_scopes[paper_id] = ScopedEvidence(evidence, {paper_id}, retrieval)
-            reading_plans[paper_id] = build_reading_plan(request.topic, paper_id,
-                str(paper.get('title') or paper_id), str(paper.get('abstract') or ''))
             full_text = item.get('full_text') or {}
             acquisition = str(full_text.get('status') or 'unknown')
             failure = load_error or (str(full_text.get('reason') or acquisition)
