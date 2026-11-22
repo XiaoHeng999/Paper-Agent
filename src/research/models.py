@@ -96,6 +96,54 @@ DIMENSIONS = {
 }
 AXES = ("question", "task", "method", "dataset", "baseline", "metric", "budget", "scope")
 
+READING_LENSES = (
+    "problem_and_scope", "method_mechanism", "assumptions",
+    "experimental_design", "causal_validation", "limitations_reproducibility",
+)
+
+
+class EvidenceRequirement(Record):
+    kind: Literal[
+        "problem", "claim", "method_step", "equation", "assumption", "dataset",
+        "baseline", "metric", "budget", "hardware", "result", "ablation",
+        "negative_result", "limitation", "implementation", "figure", "table",
+    ]
+    required: bool = True
+    description: str = ""
+
+
+class ReadingSubquery(Record):
+    id: str = Field(min_length=1)
+    source: Literal["user", "user_derived", "default_lens", "gap_repair"]
+    lens: Literal[
+        "problem_and_scope", "method_mechanism", "assumptions",
+        "experimental_design", "causal_validation", "limitations_reproducibility",
+    ]
+    question: str = Field(min_length=1)
+    retrieval_queries: list[str] = Field(min_length=1, max_length=4)
+    evidence_requirements: list[EvidenceRequirement] = Field(min_length=1, max_length=10)
+    priority: int = Field(default=3, ge=1, le=5)
+
+
+class ReadingPlan(Record):
+    paper_id: str = Field(min_length=1)
+    mode: Literal["open_ended", "guided", "targeted"]
+    paper_type: Literal[
+        "algorithm", "system", "theory", "dataset_benchmark", "survey",
+        "empirical_study", "unknown",
+    ] = "unknown"
+    user_prompt: str
+    user_questions: list[str] = Field(default_factory=list, max_length=4)
+    subqueries: list[ReadingSubquery] = Field(min_length=1, max_length=8)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SubqueryCoverage(Record):
+    subquery_id: str
+    status: Literal["covered", "partial", "unanswered"]
+    claim_ids: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
+
 
 class JudgmentCheck(Record):
     status: Literal["supported", "qualified", "contradicted", "unknown"] = "unknown"
@@ -137,6 +185,10 @@ class EvidenceSpan(Record):
     modality: Literal["text", "visual_transcription"] = "text"
     image_version: str = ""
     transcription_uncertainties: list[str] = Field(default_factory=list)
+    previous_id: str = ""
+    next_id: str = ""
+    parent_id: str = ""
+    overlap_characters: int = Field(default=0, ge=0)
 
 
 class PreparedPaper(Record):
@@ -173,6 +225,7 @@ class ClaimDraft(Record):
     study: StudyContext = Field(default_factory=StudyContext)
     attribution: Literal["author_report", "system_inference"] = "author_report"
     evidence_ids: list[str] = Field(min_length=1)
+    subquery_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
 class Claim(ClaimDraft):
@@ -265,6 +318,8 @@ class PaperCard(Record):
     verifications: list[VerificationResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     omitted_evidence_ids: list[str] = Field(default_factory=list)
+    reading_plan: ReadingPlan | None = None
+    subquery_coverage: list[SubqueryCoverage] = Field(default_factory=list)
 
 
 class ParagraphDraft(Record):

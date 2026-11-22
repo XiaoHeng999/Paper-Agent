@@ -102,6 +102,11 @@ class ResearchWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["research_report"]["cross_paper_executed"])
         self.assertIn("仅取得摘要", result["research_markdown"])
         self.assertEqual(result["research_report"]["cards"][0]["verifications"][0]["source_levels"], ["abstract"])
+        card = result["research_report"]["cards"][0]
+        self.assertTrue(card["reading_plan"]["subqueries"])
+        self.assertTrue(card["claims"][0]["subquery_ids"])
+        self.assertTrue(card["subquery_coverage"])
+        self.assertEqual(model.requests[0]["reading_plan"]["paper_id"], "p1")
 
     async def test_many_papers_no_cross_context_leak(self):
         model = FakeModel()

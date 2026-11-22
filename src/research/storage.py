@@ -31,6 +31,7 @@ def load_evidence(item: dict) -> list[EvidenceSpan]:
             chunks = build_chunks_file(document, markdown_path=path).chunks
         else:
             chunks = load_chunks_file(path.parent / "chunk.json")
+        chunk_spans = []
         for chunk in chunks:
             if chunk.paperId != paper_id:
                 continue
@@ -39,8 +40,29 @@ def load_evidence(item: dict) -> list[EvidenceSpan]:
                 text = chunk.content[offset:offset + 4000]
                 locator = chunk.chunk_id if len(chunk.content) <= 4000 else f"{chunk.chunk_id}:offset{offset}"
                 revision = version_of({"text": text, "locator": locator, "pages": [chunk.page_start, chunk.page_end]})
-                evidence.append(EvidenceSpan(id=f"{locator}@{revision}", paper_id=paper_id, version=revision,
-                    text=text, source_level="full_text", page_start=chunk.page_start, page_end=chunk.page_end, section=chunk.section))
+                span = EvidenceSpan(id=f"{locator}@{revision}", paper_id=paper_id, version=revision,
+                    text=text, source_level="full_text", page_start=chunk.page_start, page_end=chunk.page_end,
+                    section=chunk.section, parent_id=str(chunk.metadata.get("parent_id") or ""),
+                    overlap_characters=max(0, int(chunk.metadata.get("overlap_characters") or 0)))
+                evidence.append(span)
+                chunk_spans.append((chunk, span))
+        spans_by_chunk = {}
+        for chunk, span in chunk_spans:
+            spans_by_chunk.setdefault(chunk.chunk_id, []).append(span)
+        first_by_chunk = {chunk_id: spans[0].id for chunk_id, spans in spans_by_chunk.items()}
+        last_by_chunk = {chunk_id: spans[-1].id for chunk_id, spans in spans_by_chunk.items()}
+        replacements = {}
+        chunks_by_id = {chunk.chunk_id: chunk for chunk, _ in chunk_spans}
+        for chunk_id, spans in spans_by_chunk.items():
+            chunk = chunks_by_id[chunk_id]
+            for index, span in enumerate(spans):
+                previous_id = spans[index - 1].id if index else last_by_chunk.get(chunk.previous_chunk_id or "", "")
+                next_id = spans[index + 1].id if index + 1 < len(spans) else first_by_chunk.get(chunk.next_chunk_id or "", "")
+                replacements[span.id] = span.model_copy(update={
+                    "previous_id": previous_id,
+                    "next_id": next_id,
+                })
+        evidence = [replacements.get(span.id, span) for span in evidence]
     if not evidence and paper.get("abstract"):
         text = str(paper["abstract"])
         for offset in range(0, len(text), 4000):

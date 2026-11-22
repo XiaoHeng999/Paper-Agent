@@ -133,6 +133,47 @@ class PageChunker(BaseChunker):
         return chunks
 
 
+class StructureAwareChunker(BaseChunker):
+    """Keep page provenance while splitting long text at paragraph or sentence boundaries."""
+
+    name = "structure-aware-v1"
+    max_chunk_characters = 1200
+    overlap_characters = 160
+
+    def chunk(self, paper: PaperDocument, markdown: str) -> list[TextChunk]:
+        paper_id = str(paper.paperId or paper.id)
+        parts = _split_by_page_marker(markdown)
+        if not parts:
+            parts = [{"page": None, "content": _remove_front_matter(markdown)}]
+        chunks: list[TextChunk] = []
+        current_section = "正文"
+        for index, part in enumerate(parts):
+            content = str(part.get("content") or "").strip()
+            if not content:
+                continue
+            page = part.get("page")
+            page_number = int(page) if isinstance(page, int) else None
+            detected = _detect_section(content)
+            if detected:
+                current_section = detected
+            section = current_section if current_section != "正文" else (
+                f"page_{page_number}" if page_number is not None else "正文")
+            prefix = f"{paper_id}:p{page_number:04d}" if page_number is not None else f"{paper_id}:c{index:04d}"
+            segments = _split_structured_content(content, self.max_chunk_characters, self.overlap_characters)
+            parent_id = prefix + ":parent"
+            for segment_index, (segment, overlap) in enumerate(segments, start=1):
+                chunk_id = prefix if len(segments) == 1 else f"{prefix}:s{segment_index:04d}"
+                chunks.append(TextChunk(chunk_id=chunk_id, paperId=paper_id,
+                    chunk_index=len(chunks), content=segment, page_start=page_number,
+                    page_end=page_number, section=section,
+                    metadata={"chunker": self.name, "parent_id": parent_id,
+                        "segment_index": segment_index, "segment_count": len(segments),
+                        "overlap_characters": overlap,
+                        "boundary_policy": "paragraph_sentence_then_safe_cut"}))
+        _attach_neighbors(chunks)
+        return chunks
+
+
 def build_chunks_file(
     paper: PaperDocument,
     *,
@@ -148,7 +189,7 @@ def build_chunks_file(
 
     output_path = chunks_path or markdown_path.parent / "chunk.json"
     markdown = markdown_path.read_text(encoding="utf-8")
-    resolved_chunker = chunker or PageChunker()
+    resolved_chunker = chunker or StructureAwareChunker()
     fingerprint = chunk_source_version(paper, markdown, resolved_chunker)
     if chunks_are_current(paper, markdown_path, output_path, resolved_chunker):
         return ChunkBuildResult(chunks_path=output_path, chunks=load_chunks_file(output_path))
@@ -186,6 +227,99 @@ def _split_long_content(content: str, max_characters: int) -> list[str]:
         for start in range(0, len(content), max_characters)
         if content[start : start + max_characters].strip()
     ]
+
+
+def _split_structured_content(content: str, max_characters: int, overlap_characters: int) -> list[tuple[str, int]]:
+    """Pack paragraphs/sentences without crossing the limit; retain bounded sentence overlap."""
+
+    units = []
+    for block in re.split(r"\n\s*\n+", content):
+        block = block.strip()
+        if not block:
+            continue
+        if len(block) <= max_characters:
+            units.append(block)
+            continue
+        sentences = [value.strip() for value in re.split(r"(?<=[.!?。！？])\s+|(?<=[。！？])", block) if value.strip()]
+        for sentence in sentences or [block]:
+            if len(sentence) <= max_characters:
+                units.append(sentence)
+            else:
+                units.extend(_safe_cuts(sentence, max_characters))
+    if not units:
+        return []
+    segments, current = [], []
+    for unit in units:
+        candidate = "\n\n".join([*current, unit])
+        if current and len(candidate) > max_characters:
+            text = "\n\n".join(current).strip()
+            segments.append((text, 0))
+            overlap = _overlap_tail(current, overlap_characters)
+            current = [overlap, unit] if overlap else [unit]
+            while len("\n\n".join(current)) > max_characters and len(current) > 1:
+                current.pop(0)
+        else:
+            current.append(unit)
+    if current:
+        segments.append(("\n\n".join(current).strip(), 0))
+    result = []
+    previous = ""
+    for text, _ in segments:
+        overlap = _common_prefix_suffix(previous, text, overlap_characters) if previous else 0
+        result.append((text, overlap))
+        previous = text
+    return result
+
+
+def _safe_cuts(value: str, limit: int) -> list[str]:
+    """Last-resort split for a single oversized sentence, preferring whitespace/punctuation."""
+
+    result, remaining = [], value.strip()
+    while len(remaining) > limit:
+        window = remaining[:limit + 1]
+        points = [window.rfind(mark) for mark in (" ", "\n", ",", ";", "，", "；", "、")]
+        cut = max(points)
+        if cut < limit // 2:
+            cut = limit
+        result.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        result.append(remaining)
+    return result
+
+
+def _overlap_tail(units: list[str], limit: int) -> str:
+    selected, size = [], 0
+    for unit in reversed(units):
+        if selected and size + len(unit) > limit:
+            break
+        if len(unit) > limit:
+            unit = unit[-limit:]
+        selected.append(unit)
+        size += len(unit)
+        if size >= limit:
+            break
+    return "\n\n".join(reversed(selected)).strip()
+
+
+def _common_prefix_suffix(previous: str, current: str, limit: int) -> int:
+    maximum = min(len(previous), len(current), limit)
+    for size in range(maximum, 0, -1):
+        if previous[-size:] == current[:size]:
+            return size
+    return 0
+
+
+def _detect_section(content: str) -> str:
+    for line in content.splitlines()[:12]:
+        value = " ".join(line.split()).strip()
+        if not value or len(value) > 120:
+            continue
+        if re.match(r"^(?:\d+(?:\.\d+)*\s+)?(?:abstract|introduction|related work|background|method(?:ology)?|approach|experiments?|evaluation|results?|discussion|limitations?|conclusion|appendix|摘要|引言|背景|相关工作|方法|实验|结果|讨论|局限|结论|附录)\b", value, re.I):
+            return value
+        if re.match(r"^\d+(?:\.\d+)+\s+\S+", value):
+            return value
+    return ""
 
 
 async def async_build_chunks_file(
@@ -246,10 +380,11 @@ def load_chunks_file(chunks_path: Path) -> list[TextChunk]:
 
 
 def chunk_source_version(paper, markdown, chunker=None):
-    chunker = chunker or PageChunker()
+    chunker = chunker or StructureAwareChunker()
     value = {"policy": "preserve-source-v2", "paper_id": paper.paperId or paper.id,
              "markdown": markdown, "chunker": chunker.name,
-             "max_chars": getattr(chunker, "max_chunk_characters", None)}
+             "max_chars": getattr(chunker, "max_chunk_characters", None),
+             "overlap_chars": getattr(chunker, "overlap_characters", None)}
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

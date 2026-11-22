@@ -34,6 +34,10 @@ class ScopedEvidence:
         all_spans = list(self.spans.values())
         candidates = []
         for span in selected:
+            for related_id in (span.previous_id, span.next_id):
+                nearby = self.spans.get(related_id)
+                if nearby is not None and nearby.paper_id == span.paper_id and nearby not in selected and nearby not in candidates:
+                    candidates.append(nearby)
             index = all_spans.index(span)
             for nearby in all_spans[max(0, index - 1):index + 2]:
                 if nearby.paper_id == span.paper_id and nearby not in selected and nearby not in candidates:

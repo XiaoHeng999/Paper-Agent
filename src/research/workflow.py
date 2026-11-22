@@ -16,6 +16,7 @@ from .visual import prepare_visual, attach_reading_figures
 from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
+from .planning import build_reading_plan, coverage_for_plan, prioritize_for_plan
 from .reasoning import plan_arguments, research_questions, check_local_gap, synthesize, render_reasoning, review_core_question, render_core_review
 from .incremental import IncrementalPlan, policy_version, dependency_manifest
 
@@ -29,6 +30,14 @@ RELATIONS = {"equivalent": "同质", "extends": "扩展", "supports": "支持", 
 def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -> str:
     lines = [f"# {card.title}", f"论文 ID：{card.paper_id}", "核查只针对所列来源，不代表外部复现或领域新颖性验证。"]
     lines.extend(f"> {warning}" for warning in card.warnings)
+    if card.reading_plan:
+        lines.extend(["## 阅读问题规划",
+            f"模式：{card.reading_plan.mode}；论文类型：{card.reading_plan.paper_type}"])
+        coverage = {item.subquery_id: item for item in card.subquery_coverage}
+        labels = {"covered": "已覆盖", "partial": "部分覆盖", "unanswered": "未回答"}
+        for subquery in card.reading_plan.subqueries:
+            status = coverage.get(subquery.id)
+            lines.append(f"- [{labels.get(status.status, '待分析') if status else '待分析'}] {subquery.question}")
     for claim in card.claims:
         result = next((v for v in reversed(card.verifications) if v.target_id == claim.id and v.target_version == claim.version), None)
         lines.extend([f"## {KINDS[claim.kind]}", claim.statement,
@@ -123,6 +132,7 @@ def run_research_node():
         tasks.remaining_visual_papers = sum(str(i.get("full_text", {}).get("source_path", "")).lower().endswith(".pdf") for i in items)
         visual_audits = []
         source_manifests = {}
+        reading_plans = {}
         seen = set()
         async def prepare_input(item):
             paper = item.get("paper", {})
@@ -148,6 +158,8 @@ def run_research_node():
             visual_audits.append(visual_audit)
             all_evidence.extend(evidence)
             paper_scopes[paper_id] = ScopedEvidence(evidence, {paper_id}, retrieval)
+            reading_plans[paper_id] = build_reading_plan(request.topic, paper_id,
+                str(paper.get('title') or paper_id), str(paper.get('abstract') or ''))
             full_text = item.get('full_text') or {}
             acquisition = str(full_text.get('status') or 'unknown')
             failure = load_error or (str(full_text.get('reason') or acquisition)
@@ -189,6 +201,7 @@ def run_research_node():
             paper_id, title = prepared.paper_id, prepared.title
             scope = paper_scopes[paper_id]
             evidence = scope.read(prepared.evidence_ids)
+            reading_plan = reading_plans[paper_id]
             async with semaphore:
                 reused_card = restored.get(paper_id) or plan.card(paper_id)
                 if retrieval and evidence:
@@ -216,7 +229,8 @@ def run_research_node():
                     new_version = version_of({"claim": draft.model_dump(), "sources": [(e.id, e.version) for e in cited], "human_revision": old.version})
                     replacement = Claim(**draft.model_dump(), id=f"{paper_id}:claim:{new_version}", paper_id=paper_id, version=new_version)
                     revised_claims = [replacement if c.id == old.id else c for c in seed.claims]
-                cache_key = version_of({"schema": "paper-card-v6", "prepared_version": version_of(prepared.model_dump()), "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
+                cache_key = version_of({"schema": "paper-card-v7-reading-plan", "prepared_version": version_of(prepared.model_dump()), "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
+                    "reading_plan": reading_plan.model_dump(),
                     "paper": paper_id, "title": title, "evidence": [e.model_dump() for e in evidence],
                     "model": getattr(llm, "signature", "unknown"),
                     "context_chars": options.context_chars, "repair_rounds": options.max_repair_rounds})
@@ -232,7 +246,7 @@ def run_research_node():
                             return card
                     except (ValueError, KeyError):
                         pass
-                card = PaperCard(paper_id=paper_id, title=title, version=cache_key)
+                card = PaperCard(paper_id=paper_id, title=title, version=cache_key, reading_plan=reading_plan)
                 for audit in visual_audits:
                     if audit["paper_id"] == paper_id:
                         card.warnings.extend(audit["warnings"])
@@ -245,7 +259,7 @@ def run_research_node():
                 elif any(e.source_level == "abstract" for e in evidence):
                     card.warnings.append("仅取得摘要；无法据此确认全文实验细节")
                 history = []
-                priority = await scope.search(request.topic, tasks)
+                priority = await prioritize_for_plan(scope, reading_plan, tasks)
                 largest_span = max((len(e.text) for e in evidence), default=0)
                 read_budget = min(options.context_chars, max(options.context_chars * 3 // 4, largest_span))
                 focus_pending = options.reasoning_enabled and paper_id in primary_ids and revised_claims is None
@@ -261,7 +275,9 @@ def run_research_node():
                     ids = [x.id for x in batch] if batch is not None else list(scope.spans)
                     questions = {}
                     try:
-                        claims = revised_claims if revised_claims is not None else await read_claims(tasks, request.topic, paper_id, scope, ids, core_questions=questions if focus_pending else None)
+                        claims = revised_claims if revised_claims is not None else await read_claims(tasks, request.topic,
+                            paper_id, scope, ids, core_questions=questions if focus_pending else None,
+                            reading_plan=reading_plan)
                     except (ValueError, RuntimeError, TimeoutError) as exc:
                         card.warnings.append(str(exc))
                         card.omitted_evidence_ids.extend(ids)
@@ -312,7 +328,8 @@ def run_research_node():
                             try:
                                 raw, _ = await scope.expand(old.evidence_ids, verdict.repair_request, options.context_chars, tasks)
                                 repaired = await read_claims(tasks, request.topic, paper_id, scope,
-                                    [x.id for x in raw], feedback=f"原判断：{old.statement}\n核查反馈：{verdict.reason}\n修订要求：{verdict.repair_request}")
+                                    [x.id for x in raw], feedback=f"原判断：{old.statement}\n核查反馈：{verdict.reason}\n修订要求：{verdict.repair_request}",
+                                    reading_plan=reading_plan)
                                 if len(repaired) != 1:
                                     card.warnings.append("定向修订未返回单一判断，保留原判断及核查状态")
                                     break
@@ -329,6 +346,7 @@ def run_research_node():
                                 card.claims.append(target)
                                 card.verifications.append(checked)
                 card.omitted_evidence_ids = list(dict.fromkeys([*card.omitted_evidence_ids, *sorted(tasks.reading_gaps.get(paper_id, set()))]))
+                card.subquery_coverage = coverage_for_plan(reading_plan, card.claims)
                 await store.save("research_paper", {"card": card.model_dump(), "evidence": [e.model_dump() for e in evidence], "history": history}, cache_key=cache_key)
                 if reporter:
                     reporter.progress(f"已完成《{title}》的逐篇阅读核查", paper_id=paper_id)
@@ -653,7 +671,9 @@ def run_research_node():
             record = {k: v for k, v in revision.items() if k not in {"history", "seed_card", "evidence_versions"}}
             record["result_claims"] = [{"id": c.id, "version": c.version} for card in cards if card.paper_id == revision["target"]["paper_id"] for c in card.claims]
             revision_history = [*revision.get("history", []), record]
-        report = {"schema_version": 5, "prepared_papers": [p.model_dump() for p in inputs], "core_reviews": core_reviews,
+        report = {"schema_version": 6, "prepared_papers": [p.model_dump() for p in inputs],
+            "reading_plans": {paper_id: reading_plan.model_dump() for paper_id, reading_plan in reading_plans.items()},
+            "core_reviews": core_reviews,
             "first_core_review_seconds": min((s["elapsed_seconds"] for s in core_reviews), default=None), "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
             "dependencies": dependency_manifest(cards, relations, paragraphs, all_evidence, source_manifests),
             "challenges": challenges, "pair_outcomes": pair_outcomes, "visual": visual_audits, "visual_model": getattr(llm, "signature", None), "output_mode": options.output_mode, "cross_paper_executed": cross_enabled,
