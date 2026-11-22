@@ -797,6 +797,8 @@ batch size相同
 4. 链路冲突和条件一致性判断；
 5. 最多一轮 gap-driven 修复。
 
+未来需要实现多跳逻辑证据检索：以用户子问题和未满足的 Evidence Requirement 为起点，先沿 `caption_of`、`same_object`、`defines` 等高置信度关系找到直接证据，再按缺口有界扩展到 `condition_of`、`result_of`、`ablation_of` 和 `limitation_of`。每一跳必须保存 relation、confidence、provenance 和对应 evidence ID，最终由 Evidence Chain Verifier 检查各节点是否属于同一方法、实验和配置；任何一步无法确认时，结论必须降级为 `qualified` 或 `unknown`，不能依靠更多跳数补造缺失事实。
+
 ### Phase E：可选 Image Embedding
 
 1. 多模态 provider；
