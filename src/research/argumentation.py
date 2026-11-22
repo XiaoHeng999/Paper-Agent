@@ -169,13 +169,15 @@ async def ask_scoped(tasks, role, instruction, payload, schema, claims, evidence
             return node
 
         return visit(value)
-    result = await tasks.ask(role, instruction + ' 仅引用本次给定的C主张、E证据和G缺口编号，不要自己生成编号。',
+    result = await tasks.ask(role, instruction + ' 仅引用本次给定的编号：claim_id/claim_ids 使用 C 主张编号，'
+                             'evidence_id/evidence_ids 只能使用 E 原文证据编号（不能放 C 或 G），'
+                             'gap_id/gap_ids 使用 G 缺口编号。不要自己生成编号。',
                              transform(payload, aliases), schema)
     return schema.model_validate(transform(result.model_dump(), reverse))
 
 
 def check_summary(v, supplied):
-    return {key: getattr(v, key) for key in ('target_id', 'target_version', 'verdict', 'reason', 'unchecked')} | {
+    return {key: getattr(v, key) for key in ('target_id', 'target_version', 'execution_status', 'verdict', 'reason', 'unchecked')} | {
         'fidelity': v.fidelity.model_dump() | {'evidence_ids': [eid for eid in v.fidelity.evidence_ids if eid in supplied]},
         'experimental_support': v.experimental_support.model_dump() | {'evidence_ids': [eid for eid in v.experimental_support.evidence_ids if eid in supplied]},
         'counterevidence': v.counterevidence.model_dump() | {'evidence_ids': [eid for eid in v.counterevidence.evidence_ids if eid in supplied]}}

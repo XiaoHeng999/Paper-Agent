@@ -55,12 +55,22 @@ class ImageIndex:
         self.vectors = {}
         self.audit = []
         self.error = ""
+        self.queries = 0
+
+    def diagnostics(self):
+        return {"status": "unavailable" if self.error else "ready" if self.audit else
+                "no_candidates" if self.queries else "not_triggered",
+                "model": self.revision, "queries": self.queries,
+                "completed_queries": len(self.audit),
+                "encoded_crops": sum(entry['encoded_crops'] for entry in self.audit),
+                "error": self.error}
 
     def signature(self):
         paths = [self.directory / name for name in self.files]
         return [self.revision, [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in paths if p.is_file()]]
 
     async def search(self, query, scope, pages):
+        self.queries += 1
         kind = localization_type(query.question)
         views = {}
         for span in scope.spans.values():

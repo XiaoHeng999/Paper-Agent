@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 
 from src.agents.readAgent import load_read_agent_llm
-from .agents import ModelTasks, compare, read_claims, verify, write_report
+from .agents import BudgetExceeded, ModelTasks, compare, read_claims, verify, write_report
 from .context import ScopedEvidence
 from .assessment import assess_card, comparison_views
 from .models import Claim, ClaimDraft, PaperCard, PreparedPaper, ResearchOptions, version_of
@@ -14,7 +15,7 @@ from .storage import ResearchStore, load_evidence
 from .supplement import supplement_sources
 from .visual import prepare_visual, attach_reading_figures
 from .provenance import document_version, source_manifest
-from .scheduling import comparison_schedule
+from .scheduling import comparison_schedule, reading_schedule
 from .claims import merge_duplicate
 from .planning import build_reading_plan, coverage_for_plan
 from .selection import build_evidence_packets, packet_priority, refine_packets_with_model
@@ -46,10 +47,13 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
                 lines.append(f"  - 候选证据仍缺：{', '.join(packet.missing_requirements)}")
     for claim in card.claims:
         result = next((v for v in reversed(card.verifications) if v.target_id == claim.id and v.target_version == claim.version), None)
+        check_label = VERDICTS[result.verdict] if result else '未核查'
+        if result and (result.execution_status != 'completed' or '本次语义核查未完成' in result.unchecked):
+            check_label = '未完成核查'
         lines.extend([f"## {KINDS[claim.kind]}", claim.statement,
             f"前提与适用范围：{claim.conditions}", f"实验条件：{claim.experiment}",
             "判断来源：" + ("作者报告" if claim.attribution == "author_report" else "系统推断"),
-            f"核查：{VERDICTS[result.verdict] if result else '未核查'}"])
+            f"核查：{check_label}"])
         details = {key: value for key, value in claim.study.model_dump().items() if value != "unknown"}
         if details:
             lines.append("结构化研究条件：" + "；".join(f"{key}={value}" for key, value in details.items()))
@@ -118,7 +122,8 @@ def run_research_node():
         items = list(state.get("read_results") or [])
         primary_ids = {str(i.get('paper', {}).get('paperId') or i.get('paper', {}).get('id')) for i in items if i.get('source_role') != 'external_candidate'}
         tasks.reading_call_reserve = min(3 * len(primary_ids), options.max_calls // 4) if options.reasoning_enabled else 0
-        tasks.reading_time_reserve = min(120, options.timeout_seconds // 4) if options.reasoning_enabled and options.timeout_seconds > 60 else 0
+        # Planning, synthesis and independent review all need model time.
+        tasks.reading_time_reserve = min(600, options.timeout_seconds // 3) if options.reasoning_enabled and options.timeout_seconds > 60 else 0
         external_search = (state.get("read_resume_checkpoint") or {}).get("external_search") or {"attempted": False, "status": "disabled", "added_paper_ids": [], "warnings": []}
         revision = (state.get("read_resume_checkpoint") or {}).get("revision")
         parent_report = None
@@ -304,7 +309,7 @@ def run_research_node():
                         for term in ("result", "experiment", "evaluation", "实验", "结果"))), None)
                     priority_ids = list(dict.fromkeys([*priority_ids[:1], *(s.id for s in evidence[:1]),
                         *([experimental] if experimental else []), *priority_ids[1:]]))
-                batches = [None] if revised_claims is not None else scope.batches(read_budget, priority_ids)
+                batches = iter([None]) if revised_claims is not None else scope.batches(read_budget, priority_ids)
                 for batch in batches:
                     ids = [x.id for x in batch] if batch is not None else list(scope.spans)
                     questions = {}
@@ -315,12 +320,15 @@ def run_research_node():
                     except (ValueError, RuntimeError, TimeoutError) as exc:
                         card.warnings.append(str(exc))
                         card.omitted_evidence_ids.extend(ids)
+                        if isinstance(exc, BudgetExceeded) or tasks.terminal_error:
+                            card.omitted_evidence_ids.extend(span.id for remaining in batches for span in remaining or [])
+                            break
                         continue
                     if questions:
                         focus_pending = False
                         by_id = {c.id: c for c in claims}
                         claims = [*(by_id[cid] for cid in questions), *(c for c in claims if c.id not in questions)]
-                    for claim in claims:
+                    for claim in reading_schedule(claims, questions):
                         if any(v.target_id == claim.id and v.target_version == claim.version and
                                "本次语义核查未完成" not in v.unchecked for v in card.verifications):
                             continue
@@ -339,7 +347,7 @@ def run_research_node():
                             continue
                         result = await verify(tasks, claim, scope, evidence_packets=evidence_packets)
                         history.append({"target": claim.model_dump(), "verification": result.model_dump()})
-                        if core_question and not tasks.terminal_error:
+                        if core_question and result.execution_status == 'completed' and not tasks.terminal_error:
                             snapshot, issues = await review_core_question(tasks, core_question, claim, result,
                                 card, evidence, policy, source_manifests)
                             card.warnings.extend(issues)
@@ -683,11 +691,14 @@ def run_research_node():
             warnings.append("未得到可交付的跨篇关系，不能据此推断论文之间没有冲突或差异。")
         if omitted_pairs:
             warnings.append(f"预算不足，{omitted_pairs} 个候选主张对尚未比较。")
-        retrieval_status = retrieval.diagnostics() if retrieval else {"status": "not_configured", "warnings": [state.get("research_index_warning") or "未配置向量服务，使用原文分块阅读与引用回查。"]}
+        retrieval_status = retrieval.diagnostics() if retrieval else {"status": "not_configured", "warnings": [state.get("research_index_warning") or "未配置文本向量索引，正文使用分块检索与引用回查；图文检索独立配置。"]}
         warnings.extend(retrieval_status["warnings"])
         if reasoning:
             sections.insert(0, render_reasoning(reasoning))
             warnings.extend(w for result in reasoning for w in result['warnings'])
+        pending_checks = sum(v.execution_status != 'completed' for card in cards for v in card.verifications)
+        if pending_checks:
+            warnings.append(f'{pending_checks} 条判断因预算、超时或调用/输出错误未完成核查；不代表论文缺少证据。')
         title = "研究分析报告" if cross_enabled or reasoning else "逐篇阅读报告"
         markdown = f"# {title}\n\n" + "\n\n".join([*("> " + w for w in dict.fromkeys(warnings)), *sections])
         references = [i["paper"] for i in items if str(i.get("paper", {}).get("paperId") or i.get("paper", {}).get("id")) in ({c.paper_id for c in cards} | set(external_search["added_paper_ids"]))]
@@ -721,6 +732,9 @@ def run_research_node():
             "calls": tasks.calls, "usage": tasks.usage, "retrieval": retrieval_status, "external_search": external_search,
             "revision_history": revision_history}
         report['role_stats'] = tasks.role_stats
+        report['verification_execution'] = dict(Counter(
+            v.execution_status for card in cards for v in card.verifications))
+        report['image_retrieval'] = tasks.image_index.diagnostics() if tasks.image_index else {'status': 'disabled'}
         if tasks.image_index:
             report['image_embedding'] = tasks.image_index.audit
         report['recovery_trace'] = tasks.recovery_trace
@@ -728,7 +742,8 @@ def run_research_node():
             report['checkpoint_id'] = synthesis_checkpoint['id']
         await store.save("research_state", report)
         if reporter:
-            reporter.completed("研究报告已生成，核查状态与证据已保留", **tasks.usage)
+            reporter.completed(f"研究报告已保存，{pending_checks} 条判断尚未完成核查" if pending_checks
+                               else "研究报告已生成，核查状态与证据已保留", **tasks.usage)
         return {"research_report": report, "research_markdown": markdown, "research_artifact_refs": store.artifacts}
     async def guarded(state):
         owned = "research_node_llm" not in state

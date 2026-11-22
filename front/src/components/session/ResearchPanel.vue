@@ -6,6 +6,10 @@ import type { SessionRunAccepted } from "../../types/sessions";
 const props = defineProps<{ sessionKey: string; artifactId: string; busy: boolean }>();
 const emit = defineEmits<{ revision: [value: SessionRunAccepted, message: string] }>();
 const report = ref<ResearchReport | null>(null);
+const imageRetrievalStatus: Record<string, string> = {
+  disabled: '已关闭', not_triggered: '本轮未触发', no_candidates: '已尝试，但没有可裁剪候选',
+  unavailable: '不可用，已回退到文本检索', ready: '已完成检索',
+};
 const artifact = ref("");
 const error = ref("");
 const loading = ref(false);
@@ -83,6 +87,7 @@ async function startResearchRun(action: 'resume-review' | 'revisions', fields = 
     <p v-if="loading">正在读取研究对象…</p><p v-if="error" role="alert">{{ error }}</p>
     <template v-if="report">
       <p>评价仅针对已读取来源；unknown 表示证据或核查不足。人工修订将生成新报告，原记录保留。</p>
+      <p v-if="report.image_retrieval">图文向量检索：{{ imageRetrievalStatus[report.image_retrieval.status] ?? report.image_retrieval.status }}<span v-if="report.image_retrieval.model">（{{ report.image_retrieval.model }}）</span></p>
       <button v-if="report.checkpoint_id && report.reasoning?.some(r => r.pending_review)" type="button"
         :disabled="submitting || busy" @click="startResearchRun('resume-review')">继续核查已保存的草稿</button>
       <section v-for="result in report.reasoning ?? []" :key="result.paper_id" class="reasoning">
@@ -197,7 +202,7 @@ async function startResearchRun(action: 'resume-review' | 'revisions', fields = 
           <summary>{{ claim.statement }}</summary><p>成立前提：{{ claim.conditions }}</p><p>实验：{{ claim.experiment }}</p>
           <p v-for="(value, key) in claim.study" :key="key">{{ key }}：{{ value }}</p>
           <template v-for="check in card.verifications.filter(v => v.target_id === claim.id && v.target_version === claim.version)" :key="check.target_version">
-            <p>{{ label(check.verdict) }}：{{ check.reason }}</p>
+            <p>{{ (check.execution_status && check.execution_status !== 'completed') || check.unchecked?.includes('本次语义核查未完成') ? '未完成核查' : label(check.verdict) }}：{{ check.reason }}</p>
             <p v-if="check.fidelity">忠实转述：{{ label(check.fidelity.status) }}；{{ check.fidelity.reason }}</p>
             <p v-if="check.experimental_support">实验支持：{{ label(check.experimental_support.status) }}；{{ check.experimental_support.reason }}</p>
             <p v-for="(observation, index) in check.visual_observations" :key="`visual-${index}`">原页观察：第 {{ observation.page }} 页，{{ observation.locator }}；{{ observation.observation }}；{{ observation.value }} {{ observation.unit }}；条件：{{ observation.conditions }}（{{ observation.status }}）</p>

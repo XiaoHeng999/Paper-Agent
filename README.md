@@ -66,6 +66,10 @@ uv run --locked --env-file .env python main.py
 
 在阅读任务中，「图文检索模型」默认选择本地 GME-Qwen2-VL-2B，也可选择 CLIP 或关闭。需要同时使用两种模型时，用 `uv run --locked --extra gme --extra image-retrieval python main.py` 启动。GME 权重默认读取 `/data/models/liveact/qwen-vl/gme-Qwen2-VL-2B-Instruct`，可通过 `PAPER_AGENT_GME_DIR` 指定其他目录。模型仅在需要按图检索时加载。[模型配置与实测结果](docs/jit-multimodal-pdf-retrieval-design.md#13-当前实现状态)
 
+文本向量索引与图文检索独立配置：正文可通过 `embedding_profiles` 接入向量服务，或用 `PAPER_AGENT_TEXT_E5_DIR` 指定本地 multilingual-e5-small。未配置时仍使用文本与结构检索，不影响按需调用 GME。报告分别记录文本检索状态和图文检索的关闭、未触发、无候选、失败或已完成状态。
+
+`research_max_calls` 限制模型调用次数，`research_timeout_seconds` 限制研究阶段总时长。启用推理且总时长超过 60 秒时，逐条阅读为最终规划、讲解和复审预留三分之一时间（最多 600 秒）；这不是完成保证。超时、预算耗尽和调用/输出错误记为“未完成核查”，与已完成核查后得出的“证据不足”区分。结构化结果通过 `execution_status` 表达执行状态，原 `verdict` 字段保留以兼容已有消费者；统计证据结论时应只计 `execution_status=completed` 的记录。
+
 ## 使用入口
 
 | 场景 | 入口 |

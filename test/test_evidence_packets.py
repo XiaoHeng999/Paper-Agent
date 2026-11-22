@@ -84,7 +84,8 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
                 draft = VerificationDraft(verdict="verified", reason="reported", evidence_ids=["s"],
                     fidelity={"status":"supported", "evidence_ids":["s"]},
                     fact_citations=[{"clause":clause, "quote":quote, "evidence_id":eid}])
-                tasks = SimpleNamespace(options=SimpleNamespace(context_chars=4000), ask=AsyncMock(return_value=draft))
+                tasks = ModelTasks(None, ResearchOptions(context_chars=4000))
+                tasks.ask = AsyncMock(return_value=draft)
                 with patch("src.research.visual.verification_images", return_value=([], [], [])):
                     self.assertEqual((await verify(tasks, claim, scope)).verdict, verdict)
 
@@ -136,10 +137,10 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
 
         claim = Claim(id="claim", paper_id="p1", version="1", statement="Latency with FP16",
             evidence_ids=["seed", "setup"])
-        tasks = SimpleNamespace(options=SimpleNamespace(context_chars=4000),
-            ask=AsyncMock(return_value=VerificationDraft(verdict="verified", reason="reported",
+        tasks = ModelTasks(None, ResearchOptions(context_chars=4000))
+        tasks.ask = AsyncMock(return_value=VerificationDraft(verdict="verified", reason="reported",
                 evidence_ids=["seed"], fidelity={"status": "supported", "reason": "reported",
-                    "evidence_ids": ["seed"]})))
+                    "evidence_ids": ["seed"]}))
         with patch("src.research.visual.verification_images", return_value=([], [], [])):
             result = await verify(tasks, claim, scope, evidence_packets=[packet])
         self.assertEqual(result.verdict, "qualified")

@@ -440,6 +440,7 @@ class VerificationDraft(Record):
 
 
 class VerificationResult(VerificationDraft):
+    execution_status: Literal["completed", "budget_exhausted", "timed_out", "failed"] = "completed"
     retrieval_paths: list[list[RetrievalHop]] = Field(default_factory=list)
     visual_pages: list[dict] = Field(default_factory=list)
     target_id: str
