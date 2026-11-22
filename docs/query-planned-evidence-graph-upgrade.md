@@ -16,6 +16,8 @@
 
 图像向量的三种部署方式、临时内存方案和启用条件见 [Paper-Agent 图像 Embedding 策略](./image-embedding-strategy.md)。
 
+同页混合内容切分、JIT OCR/Embedding 边界，以及语义和多跳证据链设计见 [Query 驱动的 JIT 多模态 PDF 解析、检索与多跳证据设计](./jit-multimodal-pdf-retrieval-design.md)。
+
 ---
 
 ## 当前实现状态（2026-11-22）
