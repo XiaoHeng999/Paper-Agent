@@ -21,7 +21,7 @@ _FILES = {
     "tokenizer.json": "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
     "preprocessor_config.json": "6f638fb9401a6d6296feff533ee7efe657b787c49f954f82f5906b36ef2a1b1f",
 }
-_APPEARANCE = re.compile(r"\b(?:curves?|bar charts?|scatter(?:plots?)?|heatmaps?|dashed|dotted|red|blue|green|yellow|gr[ae]y|orange|black|white|circles?|arrows?|snapshots?|photos?|pictures?)\b|颜色|曲线|虚线|柱状|散点|热图", re.I)
+_APPEARANCE = re.compile(r"\b(?:curves?|bar charts?|scatter(?:plots?)?|heatmaps?|dashed|dotted|red|blue|green|yellow|gr[ae]y|orange|black|white|circles?|arrows?|snapshots?|photos?|photographs?|pictures?|rectangles?|arcs?|stacks?|stacked|columns?|colored|vertically|horizontally|grids?)\b|颜色|曲线|虚线|柱状|散点|热图|矩形|堆叠|网格|箭头", re.I)
 
 
 def localization_type(question):

@@ -158,7 +158,7 @@ class SubqueryCoverage(Record):
 class RetrievalHop(Record):
     source_id: str
     target_id: str
-    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference", "definition_of", "experiment_setting_of", "ablation_of", "limitation_of"]
+    relation: Literal["adjacent", "same_parent", "same_object", "explicit_reference", "definition_of", "experiment_setting_of", "condition_of", "result_of", "ablation_of", "limitation_of"]
     confidence: float = Field(ge=0, le=1)
     provenance: str
 
@@ -166,7 +166,7 @@ class RetrievalHop(Record):
 class EvidenceCandidateTrace(Record):
     retrieval_path: list[RetrievalHop] = Field(default_factory=list, max_length=2)
     evidence_id: str
-    retrieval_channels: list[Literal["dense", "gap_dense", "image_embedding", "lexical", "section", "exact_reference", "requirement", "relation", "fallback"]]
+    retrieval_channels: list[Literal["dense", "gap_dense", "image_embedding", "lexical", "bm25", "section", "exact_reference", "requirement", "relation", "fallback"]]
     fused_score: float = Field(ge=0)
     matched_requirements: list[str] = Field(default_factory=list)
     relation: Literal["anchor", "adjacent", "same_parent", "same_object", "independent"] = "independent"
@@ -259,6 +259,8 @@ class EvidenceSpan(Record):
     source_version: str = ""
     table_cell: TableCell | None = None
     header_evidence_id: str = ""
+    continuation_evidence_id: str = ""
+    merged_extent: tuple[int, int] | None = None
     table_notes: list[str] = Field(default_factory=list)
     id: str
     paper_id: str
@@ -378,6 +380,7 @@ class Challenge(Record):
 
 
 class ChainCheck(Record):
+    quotes: dict[str, str] = Field(default_factory=dict)
     evidence_ids: list[str] = Field(min_length=3, max_length=3)
     status: Literal["consistent", "inconsistent", "unknown"]
     reason: str = Field(min_length=1)

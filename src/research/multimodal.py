@@ -47,11 +47,12 @@ def _pipe_table(span, previous):
 
 def _table_cells(span, previous=None):
     """Return cell views and the schema available to a numbered continuation."""
+    extents = {}
     if re.search(r"<table(?:\s|>)", span.text, re.I):
         parsed = html_table(span.text)
         if parsed is None:
             return [], None
-        headers, data = parsed
+        headers, data, extents = parsed
         header_id = span.id
     else:
         parsed = _pipe_table(span, previous)
@@ -65,7 +66,10 @@ def _table_cells(span, previous=None):
         return [], None
     note_marker = r"(?:\*{1,3}|[†‡]|\[[a-z0-9]+\])"
     notes = {}
+    global_notes = []
     for line in span.text.splitlines():
+        if re.match(r"^\s*(?:Note[:：]\s*All (?:values|measurements|results|entries)\b|注[:：]\s*(?:所有|全部)(?:数值|结果|测量))", line, re.I):
+            global_notes.append(line.strip())
         match = re.fullmatch(rf"\s*({note_marker})(?:\s+|[:：]\s*)(\S.+)", line)
         if match:
             notes[match[1]] = line.strip() if match[1] not in notes else None
@@ -75,18 +79,26 @@ def _table_cells(span, previous=None):
         for c, value in enumerate(row[1:], 2):
             if not value:
                 continue
-            cell = TableCell(row=r, column=c, row_header=row[0], column_header=headers[c-1], value=value)
+            extent = extents.get((r-offset-1, c-1))
+            down, across = extent or (1, 1)
+            row_headers = list(dict.fromkeys(v[0] for v in data[r-offset-1:r-offset-1+down]))
+            cell = TableCell(row=r, column=c, row_header=" / ".join(row_headers),
+                column_header=" / ".join(headers[c-1:c-1+across]), value=value)
             marked = [cell.row_header, value]
             if header_id == span.id:
                 marked.append(cell.column_header)
             applicable = list(dict.fromkeys(notes[m[0]] for field in marked
                 if (m := re.search(note_marker + "$", field)) and notes.get(m[0])))
-            version = version_of([span.version, header_id, cell.model_dump(), applicable])
+            applicable.extend(global_notes)
+            identity = [span.version, header_id, cell.model_dump(), applicable]
+            if extent or span.continuation_evidence_id:
+                identity.extend([extent, span.continuation_evidence_id])
+            version = version_of(identity)
             text = "\n".join([f"{cell.row_header} | {cell.column_header} | {cell.value}", *applicable])
             result.append(span.model_copy(update={"id": f"{span.id}:cell:{r}:{c}@{version}",
                 "version": version, "header_evidence_id": header_id, "parent_id": span.id, "previous_id": "", "next_id": "",
                 "overlap_characters": 0, "bbox": None, "reading_order": None, "table_cell": cell, "view_type": "table_cell",
-                "text": text, "table_notes": applicable}))
+                "text": text, "table_notes": applicable, "merged_extent": extent}))
     return result, (headers, header_id, offset + len(data))
 
 
@@ -178,14 +190,37 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
             "nearby_discussion" if linked else span.view_type)
         bound = span.model_copy(update={
             "visual_object_ids": [object_ids[label] for label in sorted(linked) if label in object_ids],
-            "view_type": view_type,
+            "view_type": view_type, "continuation_evidence_id": "",
         })
         updated.append(bound)
         if (bound.source_level == "full_text" and len(linked) == 1 and len(bound.visual_object_ids) == 1
                 and next(iter(linked)).startswith("table:") and (bound.crop_version or caption_labels)):
             table_parts.append((bound, next(iter(linked))))
 
+    # An uncaptioned page can inherit a table only across a reciprocal source-text
+    # link. Reject intervening headings, changed documents and weak layout matches.
+    by_id = {s.id: s for s in updated}
+    assigned = {s.id: label for s, label in table_parts}
+    inferred = {}
+    for part in sorted(updated, key=lambda s: s.page_start or 0):
+        prior = by_id.get(part.previous_id)
+        if (not prior or prior.id not in assigned or prior.next_id != part.id
+                or not prior.page_start or part.page_start != prior.page_start + 1
+                or prior.page_end not in (None, prior.page_start) or part.page_end not in (None, part.page_start)
+                or part.id in assigned or not part.source_version or part.source_version != prior.source_version
+                or part.paper_id != prior.paper_id or part.view_type != "text"
+                or not part.text.lstrip().startswith("|") or not prior.text.rstrip().endswith("|")
+                or any(not line.strip().endswith("|") or not line.strip().startswith("|")
+                       for line in part.text.splitlines() if line.strip())):
+            continue
+        label = assigned[prior.id]
+        table_parts.append((part, label))
+        inferred[part.id] = prior
+        assigned[part.id] = label
+
+    positions = {s.id: i for i, s in enumerate(updated)}
     schemas = {}
+    schemas_by_id = {}
     for part, label in sorted(table_parts, key=lambda item: item[0].page_start or 0):
         source = part.source_version or part.crop_source_version
         page = part.page_start or 0
@@ -196,10 +231,36 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
             or re.search(r"[(（]\s*(?:continued|续表?)\s*[)）]\s*$", match[6], re.I)
             for line in lines if (match := _CAPTION.match(line)) and _canonical(match.groups()[:5])[0] == label)
         key = (part.paper_id, source, label, page)
-        previous = schemas.get((*key[:3], page-1)) if source and continued else None
+        prior = inferred.get(part.id)
+        previous = schemas.get((*key[:3], page-1)) if source and (continued or prior) else None
+        if prior:
+            if not previous or schemas_by_id.get(prior.id) != previous:
+                continue
+            parsed = _pipe_table(part, previous)
+            if not parsed or not parsed[1] or parsed[0] != previous[0]:
+                continue
+            if parsed[2] != part.id:
+                # Headerless pages need a second independent cue: a contiguous
+                # numeric row sequence or aligned boxes at opposite page edges.
+                last = prior.text.strip().splitlines()[-1].strip("| ").split("|")[0].strip()
+                first = parsed[1][0][0]
+                sequence = (all(re.fullmatch(r"[0-9]{1,11}", value) for value in (last, first))
+                    and int(first) == int(last) + 1)
+                a = pages_by_number.get(page-1, {}).get("page_bbox")
+                b = pages_by_number.get(page, {}).get("page_bbox")
+                aligned = (prior.bbox and part.bbox and a and b
+                    and abs(prior.bbox[0]-part.bbox[0]) < 4 and abs(prior.bbox[2]-part.bbox[2]) < 4
+                    and prior.bbox[1] <= a[1]+.15*(a[3]-a[1]) and part.bbox[3] >= b[3]-.15*(b[3]-b[1]))
+                if not (sequence or aligned):
+                    continue
+            part = part.model_copy(update={"visual_object_ids": [object_ids[label]],
+                "continuation_evidence_id": prior.id})
         cells, schema = _table_cells(part, previous)
         updated.extend(cells)
         if schema and part.page_end in (None, page):
+            if prior:
+                updated[positions[part.id]] = part
+            schemas_by_id[part.id] = schema
             schemas[key] = schema if key not in schemas else None
 
     visual_pages = visual_pages or {}
@@ -226,6 +287,15 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         version = version_of({**payload, "views": [(span.id, span.version) for span in views]})
         objects.append(VisualObject(id=object_id, version=version, **payload))
     return updated, objects
+
+
+def reference_passages(text, label):
+    for match in _REFERENCE.finditer(text):
+        if _canonical(match.groups())[0] == label:
+            following = text[match.end():match.end() + 300]
+            caption = bool(re.match(r"\s*[:|：—]", following)
+                and not text[text.rfind("\n", 0, match.start())+1:match.start()].strip())
+            yield "caption" if caption else "discussion", following
 
 
 def find_object_labels(text: str) -> list[tuple[str, str]]:

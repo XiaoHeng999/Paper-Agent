@@ -16,7 +16,7 @@ from pathlib import Path
 from pydantic import Field
 from .label_ocr import label_views
 from .context import ScopedEvidence
-from .planning import VISUAL_LABEL_QUERY, build_reading_plan
+from .planning import VISUAL_LABEL_QUERY, build_reading_plan, requested_visual_topics
 from .selection import build_evidence_packets
 from .multimodal import find_object_labels
 from .models import EvidenceSpan, Record, version_of
@@ -79,7 +79,40 @@ def _framed_vector_boxes(page, textpage):
         if any(textpage.get_text_bounded(*region).strip() for region in margins):
             continue
         frames.append(box)
-    return frames
+    if frames or not 3 <= len(boxes) <= 64:
+        return frames
+    # A line plot can have axes and traces but no enclosing rectangle.
+    # Accept a single contiguous drawing only if its surroundings are clear.
+    if not any(r-l > 32 and t-b <= 3 for l,b,r,t in boxes) or not any(
+            t-b > 24 and r-l <= 3 for l,b,r,t in boxes):
+        return []
+    if not _connected_boxes(boxes, 3):
+        return []
+    l,b,r,t = _union_box(boxes)
+    if (r-l)*(t-b) > .6*(x1-x0)*(y1-y0):
+        return []
+    if any(textpage.get_text_bounded(*region).strip() for region in
+            [(l-14,b,l,t), (r,b,r+14,t), (l,t,r,t+14), (l,b-14,r,b)]):
+        return []
+    return [(l,b,r,t)]
+
+
+def _union_box(boxes):
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _connected_boxes(boxes, gap):
+    seen = {0}
+    for _ in boxes:
+        before = len(seen)
+        for i, (l,b,r,t) in enumerate(boxes):
+            if any(max(l-boxes[j][2], boxes[j][0]-r, b-boxes[j][3], boxes[j][1]-t) <= gap
+                   for j in seen):
+                seen.add(i)
+        if len(seen) == before:
+            break
+    return len(seen) == len(boxes)
 
 
 def _labelled_panels(textpage, caption, images):
@@ -109,8 +142,8 @@ def _labelled_panels(textpage, caption, images):
             for j in tuple(connected):
                 l, b, r, t = images[j]
                 xgap, ygap = max(left-r, l-right), max(bottom-t, b-top)
-                if ((0 <= xgap <= 40 and abs(bottom-b) <= 16 and abs(top-t) <= 16)
-                        or (0 <= ygap <= 40 and abs(left-l) <= 16 and abs(right-r) <= 16)):
+                if ((0 <= xgap <= 40 and -ygap >= .5 * min(top-bottom, t-b))
+                        or (0 <= ygap <= 40 and -xgap >= .5 * min(right-left, r-l))):
                     connected.add(i)
                     break
         if len(connected) == before:
@@ -127,9 +160,18 @@ def _object_layout(page, textpage, text, images, reading_order, panel_layout):
     panels = {}
     if len(captions) == 1 and 2 <= len(images) <= 8 and re.match(r"^(?:fig|图)", captions[0], re.I):
         panels = _labelled_panels(textpage, captions[0], images)
-        if panels:
-            images = [(min(b[0] for b in images), min(b[1] for b in images),
-                       max(b[2] for b in images), max(b[3] for b in images))]
+        # An explicit collective caption can identify the whole without assigning
+        # individual letters. Require the indicated count and a narrow blank gutter.
+        paired = False
+        if (len(images) == 2 and not re.search(r"\([a-z]\)", captions[0])
+                and re.search(r"\b(?:both|two) panels\b|两个面板", captions[0], re.I)):
+            a,b = sorted(images)
+            gutter = (a[2], min(a[1],b[1]), b[0], max(a[3],b[3]))
+            overlap = min(a[3],b[3]) - max(a[1],b[1])
+            paired = (0 < b[0]-a[2] <= 24 and overlap >= .6*max(a[3]-a[1], b[3]-b[1])
+                      and not textpage.get_text_bounded(*gutter).strip())
+        if panels or paired:
+            images = [_union_box(images)]
     if len(captions) != len(images):
         return {}
     x0, y0, x1, y1 = page.get_bbox()
@@ -176,7 +218,7 @@ async def _visual_gaps(plan, evidence):
     """Use the native-text packet before spending any visual-model budget."""
     questions = [q for q in plan.subqueries if q.source == "user" and not labels(q.question)
         and (any(r.kind in {"precision", "visual_label"} for r in q.evidence_requirements)
-             or re.search(r"hardware|gpu|cpu|a100|硬件|显卡", q.question, re.I))]
+             or requested_visual_topics(q.question))]
     if not questions:
         return []
     scope = ScopedEvidence(evidence, {plan.paper_id})
@@ -184,8 +226,7 @@ async def _visual_gaps(plan, evidence):
     gaps = []
     for packet in packets:
         relevant = {"precision", "baseline_precision", "visual_label"}
-        if re.search(r"hardware|gpu|cpu|a100|硬件|显卡", packet.question, re.I):
-            relevant.add("hardware")
+        relevant.update(requested_visual_topics(packet.question))
         missing = sorted(set(packet.missing_requirements) & relevant)
         if missing:
             gaps.append({"subquery_id": packet.subquery_id, "question": packet.question,
@@ -198,6 +239,7 @@ def _gap_score(label, caption, gap):
     score = 3 if label in gap["references"] else 0
     topics = (r"latency|speedup|speed|throughput|faster|加速|速度|吞吐|延迟",
               r"precision|quantiz|fp16|bf16|int8|精度|量化",
+              r"ablation|消融", r"budget|cost|gpu.hours|预算|成本", r"metric|accuracy|指标|准确率",
               r"hardware|gpu|cpu|显卡|硬件", r"baseline|comparison|基线|对比")
     for pattern in topics:
         if re.search(pattern, gap["question"], re.I) and re.search(pattern, caption, re.I):

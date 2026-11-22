@@ -5,5 +5,7 @@
   {"id":"ablation","bridge":"Experiment 2: Timings","requirement":"ablation","candidate":"Experiment 2 ablation: remove router.","distractor":"Experiment 20 ablation: remove router.","relation":"ablation_of"},
   {"id":"limitation","bridge":"实验 2 的延迟","requirement":"limitation","candidate":"实验 2 局限：长序列失败。","distractor":"实验 20 局限：短序列失败。","relation":"limitation_of"},
   {"id":"same-table-different-experiment","bridge":"Table 2. Experiment 2.","requirement":"precision","candidate":"Experiment 1 setup: FP16 in Table 2.","distractor":"Experiment 3 setup: BF16 in Table 2.","relation":null},
-  {"id":"ambiguous-experiments","bridge":"Experiment 2 and Experiment 3.","requirement":"precision","candidate":"Experiment 2 setup: FP16.","distractor":"Experiment 3 setup: FP16.","relation":null}
+  {"id":"ambiguous-experiments","bridge":"Experiment 2 and Experiment 3.","requirement":"precision","candidate":"Experiment 2 setup: FP16.","distractor":"Experiment 3 setup: FP16.","relation":null},
+  {"id":"numbered-condition","bridge":"Experiment 7: Timing","requirement":"precision","candidate":"Exp. 7 condition: FP16.","distractor":"Exp. 8 condition: FP32.","relation":"condition_of"},
+  {"id":"numbered-result","bridge":"Experiment 7: Timing","requirement":"metric","candidate":"Exp. 7 result: accuracy 80%.","distractor":"Exp. 8 result: accuracy 90%.","relation":"result_of"}
 ]

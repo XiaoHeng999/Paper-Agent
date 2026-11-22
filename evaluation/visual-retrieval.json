@@ -57,5 +57,73 @@
         "visible_text": "Proxy Scores"
       }
     ]
+  },
+  {
+    "paper_id": "1512.03385",
+    "source_url": "https://arxiv.org/pdf/1512.03385",
+    "source_version": "1e0651b6810ecba34a3dbc5b5b0209226f889004607c1f203540a48d64e5a93a",
+    "cases": [
+      {
+        "id": "error-curves",
+        "question": "Which figure shows a pair of line plots with red and yellow curves dropping in steps?",
+        "label": "figure:1",
+        "visible_text": "training error"
+      },
+      {
+        "id": "skip-connection",
+        "question": "Which diagram shows two stacked rectangles with a curved shortcut and a circled plus?",
+        "label": "figure:2",
+        "visible_text": "identity"
+      },
+      {
+        "id": "stacks",
+        "question": "Which figure has three tall columns of small layer boxes and repeated arcs on the right?",
+        "label": "figure:3",
+        "visible_text": "3x3 conv"
+      }
+    ]
+  },
+  {
+    "paper_id": "1706.03762",
+    "source_url": "https://arxiv.org/pdf/1706.03762",
+    "source_version": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697",
+    "cases": [
+      {
+        "id": "encoder-decoder",
+        "question": "Which figure has two stacks of colored blocks with pink input boxes and arrows looping around layers?",
+        "label": "figure:1",
+        "visible_text": "Softmax"
+      },
+      {
+        "id": "token-links",
+        "question": "Which figure connects vertically written words in two rows with thin colored lines?",
+        "label": "figure:3",
+        "visible_text": "Attention Visualizations"
+      }
+    ]
+  },
+  {
+    "paper_id": "2005.12872",
+    "source_url": "https://arxiv.org/pdf/2005.12872",
+    "source_version": "d4b846bd44896e1d21527f48eddc422c263c9a4f8a3fa4be249750956882698d",
+    "cases": [
+      {
+        "id": "matching",
+        "question": "Which diagram starts with a photograph and ends with two side-by-side images connected to a stack of colored boxes?",
+        "label": "figure:1",
+        "visible_text": "bipartite matching"
+      },
+      {
+        "id": "stages",
+        "question": "Which figure shows dashed outlines around the processing stages and one photograph at the right?",
+        "label": "figure:2",
+        "visible_text": "prediction heads"
+      },
+      {
+        "id": "box-clouds",
+        "question": "Which figure shows a grid of small plots filled with green and purple point clouds?",
+        "label": "figure:7"
+      }
+    ]
   }
 ]

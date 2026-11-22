@@ -186,18 +186,25 @@ def _packet_views(packets: list[EvidencePacket], supplied_ids: set[str]) -> list
     return result
 
 
-_REFERENCE_OPENING = re.compile(
-    r"^\s*((?:(?:under|in|with) )?(?:this|that|the former|the latter) "
+_IMPLICIT_REFERENCE = re.compile(
+    r"((?<![A-Za-z0-9_])(?:(?:under|in|with) )?(?:this|that|the former|the latter) "
     r"(?:module|mechanism|setting|configuration|variant|experiment)\b|(?:该|上述|这一)(?:模块|机制|设置|配置|变体|实验))", re.I)
 
 
+def _experiment_names(text):
+    tokens = re.findall(r"\b[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*\b", text)
+    return {word for word in tokens if (any(c.isupper() for c in word[1:]) or
+            any(c.isdigit() for c in word)) and not re.fullmatch(
+                r"FP\d+|BF\d+|INT\d+|[AHV]\d{2,3}|CPU|GPU|TPU|RAM|FPS|GB|MB", word, re.I)}
+
+
 def _reference_context(evidence, core_ids, cited_ids, budget):
-    """Offer only linked predecessors from the same paper and section."""
+    """Read linked context and earlier setups sharing named experimental identifiers."""
     core = evidence.read(core_ids)
     total = sum(len(span.text) for span in core)
     pending = {}
     for source in core:
-        match = _REFERENCE_OPENING.match(source.text)
+        match = _IMPLICIT_REFERENCE.search(source.text[:400])
         if source.id not in cited_ids or not match or source.view_type not in {"text", "nearby_discussion"}:
             continue
         candidates = []
@@ -211,6 +218,20 @@ def _reference_context(evidence, core_ids, cited_ids, budget):
                 break
             candidates.append(prior.id)
             current = prior
+        remote = []
+        anchors = _experiment_names(source.text)
+        if source.page_start and source.source_version and len(anchors) >= 2:
+            for span in evidence.spans.values():
+                if (span.paper_id == source.paper_id and span.source_version == source.source_version
+                        and span.page_start and (span.page_end or span.page_start) < source.page_start
+                        and span.view_type == "text" and span.source_level == "full_text"
+                        and re.search(r"\b(?:setup|configured?|configuration|settings?|trained|evaluated)\b|实验设置|配置", span.text, re.I)
+                        and len(anchors & _experiment_names(span.text)) >= 2):
+                    remote.append(span.id)
+                    if len(remote) == 3:
+                        break
+        ambiguous = len(remote) > 1
+        candidates = list(dict.fromkeys([*candidates, *remote]))
         extra = [eid for eid in candidates if eid not in core_ids]
         size = sum(len(evidence.spans[eid].text) for eid in extra)
         if total + size <= budget:
@@ -218,7 +239,7 @@ def _reference_context(evidence, core_ids, cited_ids, budget):
             total += size
         else:
             candidates = []
-        pending[source.id] = {"phrase": match[1], "candidates": candidates}
+        pending[source.id] = {"phrase": match[1], "candidates": candidates, "ambiguous": ambiguous, "remote_candidates": [eid for eid in remote if eid in candidates]}
     return pending
 
 
@@ -237,7 +258,7 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                     key = (path[0].source_id, path[0].target_id, item.evidence_id)
                     chains[key] = [hop.model_dump() for hop in path]
         core_ids = list(dict.fromkeys([*target.evidence_ids, *(eid for key in chains for eid in key)]))
-        header_ids = [s.header_evidence_id for s in evidence.read(core_ids) if s.header_evidence_id]
+        header_ids = [eid for s in evidence.read(core_ids) for eid in (s.header_evidence_id, s.continuation_evidence_id) if eid]
         core_ids = list(dict.fromkeys([*core_ids, *header_ids]))
         references = _reference_context(evidence, core_ids, cited, tasks.options.context_chars)
         raw, omitted = await evidence.adversarial(core_ids,
@@ -249,7 +270,7 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
             packet.subquery_id in target.subquery_ids and
             "baseline_precision" in [*packet.covered_requirements, *packet.missing_requirements]
             for packet in evidence_packets)
-        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对 reference_candidates 中影响理解的指代，只有原文能唯一定位对象时填写 resolved_references，提供候选 antecedent_id、逐字引句和引句中的指代对象名；存在歧义时留空。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对 reference_candidates 中影响理解的指代，只有原文能唯一定位对象时填写 resolved_references，提供候选 antecedent_id、逐字引句和引句中的指代对象名；存在歧义时留空。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐。判断 consistent 时在 quotes 中为三个证据 ID 分别填写逐字引句。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
             "reference_candidates": references,
             "precision_comparison_required": precision_required,
             "retrieval_chains": list(chains.values()),
@@ -266,10 +287,23 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                     resolution.quote not in evidence.spans[resolution.antecedent_id].text or
                     resolution.referent not in resolution.quote):
                 raise ValueError("指代判断缺少有效候选或逐字原文")
-            resolved.add(resolution.source_id)
+            reference = references[resolution.source_id]
+            if resolution.antecedent_id in reference["remote_candidates"] and len(
+                    _experiment_names(resolution.quote) & _experiment_names(evidence.spans[resolution.source_id].text)) < 2:
+                raise ValueError("跨章节引句缺少与结果共同出现的实验标识")
+            if not reference["ambiguous"]:
+                resolved.add(resolution.source_id)
+        draft.resolved_references = [entry for entry in draft.resolved_references if entry.source_id in resolved]
         checks = {tuple(check.evidence_ids): check for check in draft.chain_checks}
         if checks.keys() - chains.keys() or len(checks) != len(draft.chain_checks):
             raise ValueError("Verifier 返回了未提供或重复的检索链")
+        for key, check in checks.items():
+            if set(check.quotes) - set(key) or any(not quote.strip() or quote not in evidence.spans[eid].text
+                    for eid, quote in check.quotes.items()):
+                raise ValueError("链路判断引用了无效原文")
+            if check.status == "consistent" and set(check.quotes) != set(key):
+                check.status = "unknown"
+                check.reason = "缺少链路节点的逐字引句"
         unresolved = [key for key in chains if key not in checks or checks[key].status != "consistent"]
         supplied_pages = {(p['paper_id'], p['page'], p['image_version']) for p in visual_context}
         observed_pages = set()

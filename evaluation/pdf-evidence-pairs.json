@@ -1,0 +1,105 @@
+{
+  "provenance": "AI-curated regression labels checked against the original PDFs. Each question requires two passages on different pages.",
+  "cases": [
+    {
+      "paper_id": "2610.14672v1",
+      "sha256": "59d8f5473682724fd8bd07e35b8fef7db2743a2418a971be08fb06114bbc77d4",
+      "question": "What does Figure 3 measure and which model and prompts were used for the competition-domain diagnostic?",
+      "requirements": [
+        "figure",
+        "dataset"
+      ],
+      "passages": [
+        [
+          4,
+          "Competition-Domain Mismatch under a Fixed Ranking Score"
+        ],
+        [
+          5,
+          "six denoising steps"
+        ]
+      ],
+      "answer_terms": [
+        [
+          "reconstruction error",
+          "reconstruction-error"
+        ],
+        [
+          "200"
+        ],
+        [
+          "HunyuanVideo"
+        ]
+      ]
+    },
+    {
+      "paper_id": "2607.24027v1",
+      "sha256": "32e34bb92dbb0deca5c547409feec6ae8af09a3c7178fbc6e201dbdc650076fa",
+      "question": "How does Figure 3 characterize Gaussian-calibrated density control and how close are empirical mean densities across models?",
+      "requirements": [
+        "figure",
+        "result"
+      ],
+      "passages": [
+        [
+          3,
+          "Gaussian-calibrated density control"
+        ],
+        [
+          4,
+          "empirical mean densities remain close"
+        ]
+      ],
+      "answer_terms": [
+        [
+          "Gaussian"
+        ],
+        [
+          "close",
+          "track",
+          "align",
+          "approximate",
+          "agree",
+          "match"
+        ],
+        [
+          "density",
+          "densities"
+        ]
+      ]
+    },
+    {
+      "paper_id": "IROS55552.2023.10342187",
+      "sha256": "41ee371b5fab00cb5dfca30a236ca7c10e67b4852656cac1cb3a3d2db2ba7e00",
+      "question": "Which parameter optimization pipeline does Fig. 5 illustrate and where do the authors discuss the optimization procedure?",
+      "requirements": [
+        "figure",
+        "method_step"
+      ],
+      "passages": [
+        [
+          4,
+          "Parameter optimization pipeline"
+        ],
+        [
+          5,
+          "visualizes the optimization procedure"
+        ]
+      ],
+      "answer_terms": [
+        [
+          "parameter optimization",
+          "parameter optimisation",
+          "parameter tuning"
+        ],
+        [
+          "page 5",
+          "p. 5",
+          "p5",
+          "page five",
+          "fifth page"
+        ]
+      ]
+    }
+  ]
+}

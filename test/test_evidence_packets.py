@@ -111,12 +111,43 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.repair_request)
         self.assertEqual(len(tasks.ask.await_args.args[2]["retrieval_chains"]), 1)
 
+        for quotes, verdict in [({}, "qualified"),
+                ({"seed":seed.text, "bridge":bridge.text, "setup":setup.text}, "verified"),
+                ({"seed":"fabrication"}, "insufficient_evidence")]:
+            tasks.ask.return_value = VerificationDraft(verdict="verified", reason="reported",
+                evidence_ids=["seed"], fidelity={"status":"supported","evidence_ids":["seed"]},
+                chain_checks=[{"evidence_ids":["seed","bridge","setup"], "status":"consistent",
+                    "reason":"aligned", "quotes":quotes}])
+            with patch("src.research.visual.verification_images", return_value=([], [], [])):
+                checked = await verify(tasks, claim, scope, evidence_packets=[packet])
+            self.assertEqual(checked.verdict, verdict)
+
         inferred = claim.model_copy(update={"attribution": "system_inference", "evidence_ids": ["setup"],
             "subquery_ids": [packet.subquery_id]})
         with patch("src.research.visual.verification_images", return_value=([], [], [])):
             checked = await verify(tasks, inferred, scope, evidence_packets=[packet])
         self.assertEqual(checked.retrieval_paths, [path])
         self.assertTrue({"seed", "bridge", "setup"} <= set(checked.inspected_evidence_ids))
+
+    def test_local_answer_evaluation_requires_both_real_evidence_ids(self):
+        from evaluation.local_pdf_answers import score
+        case = {"paper_id":"p", "evidence":[{"id":"a"}, {"id":"b"}],
+            "expected_sources":[["a"], ["b"]], "answer_terms":[["FP16", "half precision"], ["200"]]}
+        for citations, expected in [([1,2], True), ([1], False), ([0,1,2], False), ([True,2], False)]:
+            result = score(case, json.dumps({"answer":"200 runs at half precision", "citations":citations}))
+            self.assertEqual(result["fact_term_matches"], [True, True])
+            self.assertEqual(result["both_sources_cited"], expected)
+        self.assertFalse(any(score(case, "malformed")["fact_term_matches"]))
+
+    def test_human_evidence_benchmark_excludes_ambiguous_or_single_section_labels(self):
+        from evaluation.qasper_evidence import reference_sets
+        locations = {"a":["a"], "b":["b"], "duplicate":["a","b"]}
+        sections = {"a":1, "b":2}
+        def answer(*texts):
+            return {"answer":{"unanswerable":False, "evidence":texts}}
+        self.assertEqual(reference_sets({"answers":[answer("a","b")]}, locations, sections), [{"a","b"}])
+        for answers in ([answer("a","b"), answer("a")], [answer("a","duplicate")], [answer("missing")]):
+            self.assertEqual(reference_sets({"answers":answers}, locations, sections), [])
 
     async def test_controlled_multihop_cases(self):
         from evaluation.multihop_retrieval import evaluate
@@ -181,6 +212,37 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
             checked = await verify(tasks, claim, scope)
             self.assertEqual(checked.verdict, expected)
             self.assertEqual(tasks.ask.await_args.args[2]["reference_candidates"]["result"]["candidates"], ["setup"])
+
+    async def test_cross_section_setup_needs_unique_versioned_experiment(self):
+        setup = EvidenceSpan(id="setup", paper_id="p1", version="v", source_version="pdf",
+            section="Design", page_start=2, source_level="full_text",
+            text="The TinyNet configuration on CIFAR10 uses FP16.")
+        result = setup.model_copy(update={"id":"result", "section":"Results", "page_start":6,
+            "text":"Latency decreases under this setting for TinyNet on CIFAR10."})
+        alternative = setup.model_copy(update={"id":"alt", "text":setup.text.replace("FP16", "FP32")})
+        target = Claim(id="c", version="v", paper_id="p1", statement=result.text, evidence_ids=["result"])
+        for version, expected in [("other", "verified"), ("pdf", "qualified")]:
+            tasks = ModelTasks(None, ResearchOptions())
+            tasks.ask = AsyncMock(return_value=VerificationDraft(verdict="verified", reason="reported",
+                evidence_ids=["result"], fidelity={"status":"supported","evidence_ids":["result"]},
+                resolved_references=[{"source_id":"result","antecedent_id":"setup",
+                    "quote":setup.text,"referent":"TinyNet configuration"}]))
+            scope = ScopedEvidence([result,setup,alternative.model_copy(update={"source_version":version})], {"p1"})
+            checked = await verify(tasks, target, scope)
+            self.assertEqual(checked.verdict, expected)
+            self.assertEqual(bool(checked.resolved_references), expected == "verified")
+
+    async def test_visual_gap_requires_an_explicit_topic_and_missing_evidence(self):
+        from src.research.visual import _visual_gaps
+        for kind, question, answer in [
+                ("budget", "What is the compute budget?", "The compute budget was 300 GPU hours."),
+                ("ablation", "Where are the ablation results?", "Our ablation removes the router."),
+                ("metric", "Which accuracy metric is shown?", "The metric is top-1 accuracy.")]:
+            query = subquery([kind], question)
+            self.assertEqual((await _visual_gaps(plan(query), []))[0]["requirements"], [kind])
+            span = EvidenceSpan(id="a", paper_id="p1", version="v", source_level="full_text", text=answer)
+            self.assertEqual(await _visual_gaps(plan(query), [span]), [])
+            self.assertEqual(await _visual_gaps(plan(subquery([kind], "Summarize the paper")), []), [])
 
     async def test_verifying_a_continued_cell_reads_both_original_pages(self):
         from src.research.multimodal import build_multimodal_catalog

@@ -81,15 +81,32 @@ def html_table(text):
                 col += across
             depth += 1
         else:
-            if any(down != 1 or across != 1 or (col and kind != "td")
-                   for col, (kind, down, across, _) in enumerate(row)):
-                return None
-            body.append([value for _, _, _, value in row])
+            body.append(row)
     if not depth or not body:
         return None
-    width = len(body[0])
+    width = max(c for _, c in grid) + 1
     if set(grid) != {(r,c) for r in range(depth) for c in range(width)}:
         return None
+    slots, extents = {}, {}
+    for r, row in enumerate(body):
+        col = 0
+        for kind, down, across, value in row:
+            while (r, col) in slots:
+                col += 1
+            if (col + across > width or r + down > len(body) or (col and kind != "td")
+                    or (not col and across != 1)):
+                return None
+            for rr in range(r, r+down):
+                for cc in range(col, col+across):
+                    if (rr, cc) in slots:
+                        return None
+                    slots[rr, cc] = value if cc == 0 or (rr, cc) == (r, col) else ""
+            if col and (across > 1 or down > 1):
+                extents[r, col] = (down, across)
+            col += across
+    if len(slots) != len(body)*width:
+        return None
+    values = [[slots[r,c] for c in range(width)] for r in range(len(body))]
     headers = [" / ".join(v for _, _, v in dict.fromkeys(grid[r,c] for r in range(depth)) if v)
                for c in range(width)]
-    return headers, body
+    return headers, values, extents

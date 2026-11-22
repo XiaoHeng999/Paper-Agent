@@ -105,6 +105,37 @@ class MultimodalObjectTests(unittest.IsolatedAsyncioTestCase):
             spans, _ = build_multimodal_catalog([first, second.model_copy(update=update)])
             self.assertFalse(any(s.table_cell and s.parent_id == "next" for s in spans))
 
+    def test_unmarked_continuation_requires_link_version_and_schema(self):
+        first = EvidenceSpan(id="a", version="v", paper_id="p", source_version="src",
+            source_level="full_text", page_start=1, next_id="b",
+            text="Table 3: Trials\n|Run|Time|\n|---|---|\n|1|3s|")
+        second = first.model_copy(update={"id": "b", "page_start": 2, "previous_id": "a",
+            "next_id": "", "text": "|2|4s|"})
+        for fields in ({}, {"text": "|Run|Time|\n|---|---|\n|X|4s|"}):
+            spans, objects = build_multimodal_catalog([second.model_copy(update=fields), first])
+            parent = spans[0]
+            cell, = [s for s in spans if s.parent_id == "b"]
+            self.assertEqual((cell.table_cell.row, cell.continuation_evidence_id), (2, "a"))
+            self.assertEqual(parent.visual_object_ids, [objects[0].id])
+            self.assertEqual(build_multimodal_catalog(spans), (spans, objects))
+        for fields in ({"text":"|5|4s|"}, {"previous_id":""}, {"source_version":"other"},
+                       {"text":"|Run|Power|\n|---|---|\n|2|4W|"}):
+            spans, _ = build_multimodal_catalog([first, second.model_copy(update=fields)])
+            self.assertFalse(any(s.parent_id == "b" for s in spans))
+
+    def test_body_merges_keep_one_value_and_only_grounded_notes(self):
+        text = ("Table 1: Time\n<table><tr><th>Run</th><th>Min</th><th>Max</th></tr>"
+                "<tr><td>A</td><td rowspan='2' colspan='2'>5</td></tr>"
+                "<tr><td>B</td></tr></table>\nNote: All values are seconds.\nNote: Some runs excluded.")
+        table = EvidenceSpan(id="t", version="v", paper_id="p", source_level="full_text", text=text)
+        spans, _ = build_multimodal_catalog([table])
+        cell, = [s for s in spans if s.table_cell]
+        self.assertEqual(cell.merged_extent, (2, 2))
+        self.assertEqual((cell.table_cell.row_header, cell.table_cell.column_header), ("A / B", "Min / Max"))
+        self.assertEqual(cell.table_notes, ["Note: All values are seconds."])
+        spans, _ = build_multimodal_catalog([table.model_copy(update={"text":text.replace("rowspan='2'", "rowspan='3'")})])
+        self.assertFalse(any(s.table_cell for s in spans))
+
     async def test_packet_expands_from_text_reference_to_other_object_views(self):
         updated, _ = build_multimodal_catalog(self.evidence(),
             [{"page": 3, "captions": ["figure:2"]}])

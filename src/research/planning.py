@@ -153,6 +153,17 @@ def coverage_for_plan(plan: ReadingPlan, claims: list[Claim], packets: list[Evid
 VISUAL_LABEL_QUERY = re.compile(r"\b(?:ax[ie]s|legends?|units?)\b|坐标轴|图例|单位|横轴|纵轴", re.I)
 
 
+def requested_visual_topics(question):
+    patterns = {
+        "hardware": r"hardware|gpu|cpu|a100|硬件|显卡",
+        "ablation": r"ablation|消融",
+        "budget": r"training (?:time|cost)|compute budget|gpu.hours|训练时长|计算预算",
+        "metric": r"metric|accuracy|latency|throughput|指标|准确率|延迟|吞吐",
+    }
+
+    return [kind for kind, pattern in patterns.items() if re.search(pattern, question, re.I)]
+
+
 def _subquery(paper_id, source, lens, question, priority):
     _, requirements, retrieval = _LENS_SPECS[lens]
     if re.search(r"fp(?:16|32|64|8)|bf16|int[48]|量化|数值精度|低精度|混合精度|基线精度|mixed precision|lower precision|numerical precision|baseline precision", question, re.I):
@@ -161,6 +172,8 @@ def _subquery(paper_id, source, lens, question, priority):
             requirements = (*requirements, "baseline_precision")
     if VISUAL_LABEL_QUERY.search(question):
         requirements = (*requirements, "visual_label")
+    if source == "user":
+        requirements = tuple(dict.fromkeys([*requirements, *requested_visual_topics(question)]))
     value = [paper_id, source, lens, question]
     return ReadingSubquery(id=f"rq:{version_of(value)}", source=source, lens=lens,
         question=question, retrieval_queries=[question, retrieval], priority=priority,

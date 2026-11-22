@@ -180,7 +180,7 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
             writer, stream = two_figure_pdf(path)
             image = next(iter(writer.pages[0]["/Resources"]["/XObject"]))
             body = f"""q 100 0 0 80 40 240 cm {image} Do Q
-                q 100 0 0 80 160 240 cm {image} Do Q
+                q 100 0 0 80 160 261 cm {image} Do Q
                 BT /HeaderFont 10 Tf 42 304 Td ((a)) Tj ET
                 BT /HeaderFont 10 Tf 162 304 Td ((b)) Tj ET
                 BT /HeaderFont 12 Tf 40 220 Td (Figure 1: (a) Accuracy and (b) Latency across runs) Tj ET"""
@@ -191,10 +191,28 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
                 pages, _, _ = inspect_pdf(path, 1)
                 self.assertEqual(bool(pages[0]["panel_bboxes"]), expected)
                 if expected:
-                    self.assertEqual(pages[0]["object_bboxes"]["figure:1"], [40,240,260,320])
+                    self.assertEqual(pages[0]["object_bboxes"]["figure:1"], [40,240,260,341])
                     self.assertEqual(set(pages[0]["panel_bboxes"]["figure:1"]), {"a", "b"})
-                    self.assertEqual(pages[0]["object_bboxes"]["figure:1b"], [160, 240, 260, 320])
+                    self.assertEqual(pages[0]["object_bboxes"]["figure:1b"], [160, 261, 260, 341])
                     self.assertEqual(labels("Inspect Figure 1(b)"), {"figure:1b"})
+
+    def test_collective_caption_and_unframed_vector_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.pdf"
+            writer, stream = two_figure_pdf(path)
+            image = next(iter(writer.pages[0]["/Resources"]["/XObject"]))
+            pair = f"q 100 0 0 80 40 240 cm {image} Do Q q 100 0 0 75 152 254 cm {image} Do Q"
+            plot = "40 240 m 240 240 l S 40 240 m 40 320 l S 40 247 m 160 300 l S"
+            for drawing, caption, expected in [
+                    (pair, "Both panels compare latency across runs", True),
+                    (pair, "A measurement of latency across runs", False),
+                    (plot, "Latency curves across multiple runs", True),
+                    (plot+" 300 470 m 360 470 l S", "Latency curves across multiple runs", False)]:
+                stream.set_data((drawing + f" BT /HeaderFont 12 Tf 40 213 Td (Figure 3: {caption}) Tj ET").encode())
+                with path.open("wb") as out:
+                    writer.write(out)
+                pages, _, _ = inspect_pdf(path, 1)
+                self.assertEqual(set(pages[0]["object_bboxes"]), {"figure:3"} if expected else set(), drawing)
 
     def test_framed_vector_diagram_rejects_outside_tick_labels(self):
         with tempfile.TemporaryDirectory() as directory:

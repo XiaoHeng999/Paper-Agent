@@ -5,11 +5,12 @@ then assemble a small packet; the packet remains candidate evidence until Reader
 """
 from __future__ import annotations
 
+import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from .image_retrieval import localization_type, visual_gap
-from .multimodal import find_object_labels
+from .multimodal import find_object_labels, reference_passages
 from .models import (
     EvidenceCandidateTrace, EvidencePacket, IncrementJudgmentBatch, NodeJudgmentBatch,
     ReadingPlan, ReadingSubquery, RetrievalHop, version_of,
@@ -17,7 +18,7 @@ from .models import (
 
 
 _RRF_OFFSET = 60
-_POLICY = "rrf-relation-greedy-v3"
+_POLICY = "rrf-relation-greedy-v4"
 
 _REQUIREMENT_TERMS = {
     "problem": ("problem", "motivation", "challenge", "问题", "动机", "挑战"),
@@ -192,12 +193,19 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
             scores[span.id] += 1 / (_RRF_OFFSET + rank)
             channels.setdefault(span.id, set()).add(channel)
 
+    # The generated lens query contains generic terms such as "method" and
+    # "result". Rank the user's own terminology independently of that expansion.
+    if subquery.source == "user" and not exact and not localization_type(subquery.question):
+        for rank, span in _rank_question_terms(scope.spans.values(), subquery.question, 12):
+            scores[span.id] += 1 / (_RRF_OFFSET + rank)
+            channels.setdefault(span.id, set()).add("bm25")
+
     if not scores:
         for rank, span in enumerate(list(scope.spans.values())[:3], start=1):
             scores[span.id] = 1 / (_RRF_OFFSET + rank)
             channels[span.id] = {"fallback"}
 
-    topical = {"dense", "exact_reference", "lexical"}
+    topical = {"dense", "exact_reference", "lexical", "bm25"}
     seed_ids = sorted(scores, key=lambda eid: (-scores[eid], not bool(topical & channels[eid]), eid))[:4]
     paths = {}
     seed_scores = dict(scores)
@@ -221,7 +229,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
             if related_id not in scope.spans:
                 continue
             target = scope.spans[related_id]
-            if target.paper_id != seed.paper_id or related_id == seed_id:
+            if (target.paper_id != seed.paper_id or related_id == seed_id or
+                    (target.source_version and seed.source_version and target.source_version != seed.source_version)):
                 continue
             shared = sorted(set(seed.visual_object_ids) & set(target.visual_object_ids))
             relation = "same_object" if shared else _relation(seed, target)
@@ -240,7 +249,7 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
 
 _EXPERIMENT = re.compile(
     r"(?<![a-z0-9])(?:experiment|exp\.|实验)\s*#?\s*([a-z]?\d+(?:[.-]\d+)*[a-z]?)(?![a-z0-9])", re.I)
-_SETUP = re.compile(r"\s*(?:[:：—-]\s*)?(setup|configuration|settings?|ablation|limitations?|设置|配置|消融|局限)", re.I)
+_SETUP = re.compile(r"\s*(?:[:：—-]\s*)?(setup|configuration|settings?|conditions?|results?|ablation|limitations?|设置|配置|条件|结果|消融|局限)(?![a-z])", re.I)
 
 
 def _gap_hop(bridge, span, experiments, labels, requirements):
@@ -259,6 +268,12 @@ def _gap_hop(bridge, span, experiments, labels, requirements):
                     continue
                 if relation == "limitation_of" and "limitation" not in requirements:
                     continue
+                if marker.startswith("condition") or marker == "条件":
+                    relation = "condition_of"
+                if marker.startswith("result") or marker == "结果":
+                    if not requirements & {"result", "metric", "negative_result"}:
+                        continue
+                    relation = "result_of"
                 return RetrievalHop(source_id=bridge.id, target_id=span.id, relation=relation,
                     confidence=1, provenance=span.text[mention.start():cue.end()])
     shared = labels.intersection(find_object_labels(span.text))
@@ -271,7 +286,7 @@ def _gap_hop(bridge, span, experiments, labels, requirements):
 
 def _expand_reference_gaps(scope, packet, ranked, paths):
     gaps = set(packet.missing_requirements) & {
-        "hardware", "precision", "baseline_precision", "budget", "implementation", "ablation", "limitation"}
+        "hardware", "precision", "baseline_precision", "budget", "implementation", "ablation", "limitation", "metric", "result", "assumption", "negative_result"}
     if not gaps:
         return []
     entries = {span.id: (span, score, channels) for span, score, channels in ranked}
@@ -288,6 +303,8 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
             continue
         for span in scope.spans.values():
             if span.crop_version or span.view_type == "object_text" or span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
+                continue
+            if span.source_version and bridge.source_version and span.source_version != bridge.source_version:
                 continue
             if span.id == paths[bridge_id][0].source_id or not _matched_requirements(span, gaps):
                 continue
@@ -309,16 +326,30 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
 def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visual_anchor=None):
     required = [item.kind for item in subquery.evidence_requirements if item.required]
     matches = {span.id: _matched_requirements(span, required) for span, _, _ in ranked}
+    references = find_object_labels(subquery.question)
+    roles = {}
+    if len(references) == 1 and references[0][1] in required and len(required) > 1:
+        terms = set(_terms(subquery.question)) - {"the", "and", "does", "figure", "table", "how", "what"}
+        for span, _, _ in ranked:
+            passages = reference_passages(span.text, references[0][0])
+            relevance = {}
+            for role, text in passages:
+                relevance[role] = max(relevance.get(role, 0), len(terms.intersection(_terms(text))))
+            if relevance:
+                roles[span.id] = relevance
     kind = localization_type(subquery.question)
     anchors = [entry for entry in ranked if len(entry[0].visual_object_ids) == 1
         and entry[0].visual_object_ids[0].startswith(f"{entry[0].paper_id}:visual-object:{kind}:")
         and (not visual_anchor or entry[0].id == visual_anchor)] if kind else []
+    available_roles = {role for entries in roles.values() for role in entries}
     anchor_entry = max(anchors or ranked, key=lambda item: (item[1] * 100 +
+        min(6, max(roles.get(item[0].id, {}).values(), default=0)) +
         (1.0 if "dense" in item[2] else 0.8 if "exact_reference" in item[2] else 0), item[0].id)) if ranked else None
     selected = [anchor_entry] if anchor_entry else []
     covered = set(matches[anchor_entry[0].id]) if anchor_entry else set()
     total = len(anchor_entry[0].text) if anchor_entry else 0
     remaining = [item for item in ranked if item != anchor_entry]
+    selected_roles = set(roles.get(anchor_entry[0].id, {})) if anchor_entry else set()
     while remaining and len(selected) < max_nodes:
         best = None
         best_value = float("-inf")
@@ -329,6 +360,9 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visua
             limitation_bonus = 1.5 if {"limitation", "negative_result"} & set(matches[span.id]) else 0
             redundancy = max((_text_overlap(span.text, item[0].text) for item in selected), default=0)
             value = fused_score * 100 + len(new_requirements) * 3 + limitation_bonus - redundancy * 2
+            for role, overlap in roles.get(span.id, {}).items():
+                if role not in selected_roles:
+                    value += 8 + min(overlap, 6)
             if value > best_value:
                 best, best_value = (span, fused_score, channels), value
         if best is None:
@@ -337,7 +371,8 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visua
         remaining.remove(best)
         total += len(best[0].text)
         covered.update(matches[best[0].id])
-        if set(required) <= covered:
+        selected_roles.update(roles.get(best[0].id, {}))
+        if set(required) <= covered and available_roles <= selected_roles:
             break
 
     anchor = selected[0][0] if selected else None
@@ -428,6 +463,37 @@ def _matched_requirements(span, required):
             r"\s*[:：|=]?\s*(?:fp(?:8|16|32|64)|bf16|int[48])(?![a-z0-9])", span.text, re.I)):
         matched.append("baseline_precision")
     return matched
+
+
+def _rank_question_terms(spans, question, limit):
+    stop = {"the", "and", "what", "which", "does", "did", "are", "were", "how", "they",
+            "this", "that", "for", "was", "with", "from", "paper", "their", "authors"}
+    terms = set(_terms(question)) - stop
+    if not terms:
+        return []
+    documents = []
+    frequency = Counter()
+    for span in spans:
+        # Latin terms use whole words so "art" does not match "partial".
+        words = re.findall(r"[a-z0-9_-]+|[\u4e00-\u9fff]+", span.text.casefold())
+        counts = Counter()
+        for word in words:
+            if word in terms:
+                counts[word] += 1
+            elif len(word) > 2 and "\u4e00" <= word[0] <= "\u9fff":
+                counts.update(token for token in _terms(word) if token in terms)
+        documents.append((span, counts, len(words)))
+        frequency.update(counts.keys())
+    n = len(documents)
+    average = sum(length for _, _, length in documents) / max(1, n)
+    ranked = []
+    for position, (span, counts, length) in enumerate(documents):
+        norm = 1.2 * (.25 + .75 * length / max(1, average))
+        score = sum(math.log1p((n-frequency[t]+.5)/(frequency[t]+.5)) * count/(count+norm)
+                    for t, count in counts.items())
+        if score:
+            ranked.append((-score, position, span))
+    return _competition_ranks(ranked, limit)
 
 
 def _rank_lexical(spans, query, limit):
