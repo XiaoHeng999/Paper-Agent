@@ -250,6 +250,9 @@ class TableCell(Record):
 
 
 class EvidenceSpan(Record):
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    reading_order: int | None = Field(default=None, ge=0)
+    source_version: str = ""
     table_cell: TableCell | None = None
     id: str
     paper_id: str
@@ -413,6 +416,7 @@ class VerificationResult(VerificationDraft):
 
 
 class VisualObject(Record):
+    reading_order: int | None = Field(default=None, ge=0)
     source_version: str = ""
     crop_version: str = ""
     id: str

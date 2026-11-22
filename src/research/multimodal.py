@@ -42,7 +42,7 @@ def _table_cells(span):
             version = version_of([span.version, cell.model_dump()])
             result.append(span.model_copy(update={"id": f"{span.id}:cell:{r}:{c}@{version}",
                 "version": version, "parent_id": span.id, "previous_id": "", "next_id": "",
-                "overlap_characters": 0, "table_cell": cell, "view_type": "table_cell",
+                "overlap_characters": 0, "bbox": None, "reading_order": None, "table_cell": cell, "view_type": "table_cell",
                 "text": f"{cell.row_header} | {cell.column_header} | {cell.value}"}))
     return result
 
@@ -131,6 +131,7 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         payload = {"source_version": page_meta.get("source_version", ""),
             "crop_version": next((span.crop_version for span in views if span.crop_version), ""),
             "paper_id": paper_id, "object_type": record["object_type"], "label": label,
+            "reading_order": page_meta.get("object_reading_order", {}).get(label),
             "page": record["page"], "caption": record["caption"], "bbox": page_meta.get("object_bboxes", {}).get(label),
             "image_version": image_version, "caption_evidence_ids": caption_ids,
             "cell_evidence_ids": [s.id for s in views if s.table_cell],

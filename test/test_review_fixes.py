@@ -167,6 +167,30 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
             _, _, catalog = inspect_pdf(path, 1)
             self.assertEqual(catalog[0]["object_bboxes"], {})
 
+    async def test_rotation_keeps_crop_and_native_text_in_the_same_pdf_coordinates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rotated.pdf"
+            writer, _ = two_figure_pdf(path)
+            writer.pages[0].rotate(90)
+            with path.open("wb") as out:
+                writer.write(out)
+            paper = item()
+            paper["full_text"]["source_path"] = str(path)
+            tasks = ModelTasks(VisualModel(), ResearchOptions())
+            tasks.question = "Figure 2?"
+            source = EvidenceSpan(id="caption", version="v", paper_id="p1", source_level="full_text",
+                page_start=1, text="Figure 2: Second experiment latency")
+            spans, audit = await prepare_visual(tasks, paper, [source])
+            self.assertFalse(audit["warnings"])
+            crop = base64.b64decode(tasks.llm.images[0][0]["image_url"]["url"].split(",")[1])
+            with Image.open(io.BytesIO(crop)) as image:
+                self.assertEqual(image.size, (160, 400))
+            caption, transcription = spans
+            self.assertEqual(caption.reading_order, transcription.reading_order)
+            self.assertEqual(caption.source_version, transcription.source_version)
+            self.assertLess(caption.bbox[3], transcription.bbox[1])
+            self.assertEqual(transcription.bbox, [40, 240, 240, 320])
+
     async def test_precision_gap_selects_latency_crop_without_a_figure_number(self):
         from src.research.planning import build_reading_plan
         from src.research.selection import build_evidence_packets

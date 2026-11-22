@@ -7,7 +7,6 @@ import asyncio
 import base64
 import hashlib
 import io
-import math
 import re
 import threading
 from contextlib import closing
@@ -34,9 +33,9 @@ def labels(text):
     return {label for label, _ in find_object_labels(text)}
 
 
-def _raster_layout(page, textpage, text, images):
+def _object_layout(page, textpage, text, images, reading_order):
     """Bind captions to nearby raster objects only for an unambiguous one-to-one layout."""
-    if not images or len(images) > 12 or page.get_rotation():
+    if not images or len(images) > 12:
         return {}
     pattern = r"^\s*((?:fig(?:ure)?\.?|table|图|表)\s*[A-Z]?\d+(?:[.-]\d+)?[a-z]?)\s*[:.|：—-]\s*\S"
     captions = [line.strip() for line in text.splitlines() if re.match(pattern, line, re.I)]
@@ -62,19 +61,16 @@ def _raster_layout(page, textpage, text, images):
         if len(candidates) != 1 or candidates[0] in layout.values() or label in layout:
             return {}
         layout[label] = candidates[0]
+        reading_order[label] = match[0]
     return layout
 
 
-def _crop_png(page, bbox):
-    """Map unrotated PDF canvas coordinates to the selected page bitmap."""
+def _crop_png(page, label):
+    """Crop using the pixel transform from the same PDFium render."""
     from PIL import Image
-    x0, y0, x1, y1 = page["page_bbox"]
-    left, bottom, right, top = bbox
+    box = page["pixel_bboxes"][label]
     data = base64.b64decode(page["url"].split(",", 1)[1])
     with Image.open(io.BytesIO(data)) as image:
-        sx, sy = image.width / (x1-x0), image.height / (y1-y0)
-        box = (math.floor((left-x0)*sx), math.floor((y1-top)*sy),
-               math.ceil((right-x0)*sx), math.ceil((y1-bottom)*sy))
         output = io.BytesIO()
         image.crop(box).save(output, format="PNG")
         return output.getvalue()
@@ -113,7 +109,21 @@ def _gap_score(label, caption, gap):
     return score
 
 
-def inspect_pdf(path, limit, query="", gaps=()):
+def _locate_text(textpage, spans, positions, source_version):
+    """Keep native character order and the union of rectangles for unique exact matches."""
+    for span in spans:
+        with closing(textpage.search(span.text.strip(), match_case=True)) as search:
+            match = search.get_next()
+            if not match or search.get_next():
+                continue
+        rects = [textpage.get_rect(i) for i in range(textpage.count_rects(*match))]
+        if rects:
+            positions[span.id] = {"bbox": [min(r[0] for r in rects), min(r[1] for r in rects),
+                max(r[2] for r in rects), max(r[3] for r in rects)],
+                "reading_order": match[0], "source_version": source_version}
+
+
+def inspect_pdf(path, limit, query="", gaps=(), spans_by_page=None, positions=None):
     import pypdfium2 as pdfium
     from pypdfium2 import raw
     path = Path(path)
@@ -127,22 +137,31 @@ def inspect_pdf(path, limit, query="", gaps=()):
         for index in range(min(len(document), 500)):
             with closing(document[index]) as page:
                 direct_images = []
-                nested_images = False
+                form_boxes = []
                 width, height = page.get_size()
                 image_area = 0
-                for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE]):
+                for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE, raw.FPDF_PAGEOBJ_FORM]):
+                    if obj.type == raw.FPDF_PAGEOBJ_FORM:
+                        if not obj.level and next(page.get_objects(form=obj,
+                                filter=[raw.FPDF_PAGEOBJ_PATH, raw.FPDF_PAGEOBJ_IMAGE]), None) is not None:
+                            form_boxes.append(obj.get_bounds())
+                        continue
                     left, bottom, right, top = obj.get_bounds()
-                    if obj.level:
-                        nested_images = True
-                    else:
+                    if not obj.level:
                         direct_images.append((left, bottom, right, top))
                     image_area += max(0, right-left) * max(0, top-bottom)
                 with closing(page.get_textpage()) as textpage:
                     text = textpage.get_text_range()
                     layout = {}
-                    if not nested_images and image_area < width * height * .6 and len(text.strip()) >= 40:
+                    if positions is not None and spans_by_page:
                         try:
-                            layout = _raster_layout(page, textpage, text, direct_images)
+                            _locate_text(textpage, spans_by_page.get(index+1, []), positions, source_hash)
+                        except pdfium.PdfiumError:
+                            pass
+                    reading_order = {}
+                    if image_area < width * height * .6 and len(text.strip()) >= 40:
+                        try:
+                            layout = _object_layout(page, textpage, text, direct_images + form_boxes, reading_order)
                         except pdfium.PdfiumError:
                             layout = {}
                 # Full-page raster plus a searchable header is still a scan.
@@ -166,17 +185,24 @@ def inspect_pdf(path, limit, query="", gaps=()):
                     continue
                 candidates.append({"page": index+1, "scanned": scanned, "captions": sorted(captions), "visual_content": bool(scanned or image_area or captions),
                     "source_version": source_hash, "page_bbox": list(page.get_bbox()),
-                    "object_bboxes": layout, "gap_candidates": gap_candidates,
+                    "object_bboxes": layout, "object_reading_order": reading_order if layout else {}, "gap_candidates": gap_candidates,
                     "priority": (int(bool(captions & wanted)), max((v["score"] for v in gap_candidates.values()), default=0), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
         ordered = sorted(candidates, key=lambda p: (tuple(-x for x in p['priority']), p['page']))
         for metadata in ordered[:limit]:
             with closing(document[metadata['page']-1]) as page:
                 width, height = page.get_size()
                 with closing(page.render(scale=min(2, 1800 / max(width, height)))) as bitmap:
+                    converter = bitmap.get_posconv(page)
+                    pixel_boxes = {}
+                    for label, (l, b, r, t) in metadata["object_bboxes"].items():
+                        x1, y1 = converter.to_bitmap(l, b)
+                        x2, y2 = converter.to_bitmap(r, t)
+                        if x1 != x2 and y1 != y2:
+                            pixel_boxes[label] = [min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2)]
                     output = io.BytesIO()
                     bitmap.to_pil().save(output, format="PNG")
                     data = output.getvalue()
-                selected.append({**metadata, "image_version": hashlib.sha256(data).hexdigest(),
+                selected.append({**metadata, "pixel_bboxes": pixel_boxes, "image_version": hashlib.sha256(data).hexdigest(),
                     "url": "data:image/png;base64," + base64.b64encode(data).decode()})
         selected_pages = {p['page'] for p in selected}
         omitted = [p['page'] for p in candidates if p['page'] not in selected_pages] + list(range(501, len(document)+1))
@@ -206,7 +232,11 @@ async def prepare_visual(tasks, item, evidence, reading_plan=None):
         plan = reading_plan or build_reading_plan(question, paper_id, paper.get("title") or paper_id)
         gaps = await _visual_gaps(plan, evidence)
         audit["visual_gaps"] = gaps
-        pages, omitted, catalog = await asyncio.to_thread(inspect_pdf, path, min(tasks.options.visual_page_limit, fair_limit), question, gaps)
+        positions, spans_by_page = {}, {}
+        for span in evidence:
+            if span.page_start and span.page_end in (None, span.page_start) and span.text.strip():
+                spans_by_page.setdefault(span.page_start, []).append(span)
+        pages, omitted, catalog = await asyncio.to_thread(inspect_pdf, path, min(tasks.options.visual_page_limit, fair_limit), question, gaps, spans_by_page, positions)
         tasks.visual_catalog[paper_id] = catalog
         audit.update(status="prepared", omitted_pages=omitted)
         if omitted:
@@ -217,9 +247,10 @@ async def prepare_visual(tasks, item, evidence, reading_plan=None):
         for span in evidence:
             page_numbers = range(span.page_start, (span.page_end or span.page_start) + 1) if span.page_start else []
             hashes = [image_versions[n] for n in page_numbers if n in image_versions]
-            if hashes:
-                version = version_of([span.version, hashes])
-                span = span.model_copy(update={"id": span.id + ":visual@" + version, "version": version})
+            location = positions.get(span.id, {})
+            if hashes or location:
+                version = version_of([span.version, hashes, location])
+                span = span.model_copy(update={"id": span.id + ":visual@" + version, "version": version, **location})
             updated.append(span)
         remapped = {old.id: new.id for old, new in zip(evidence, updated)}
         evidence = [span.model_copy(update={
@@ -229,7 +260,7 @@ async def prepare_visual(tasks, item, evidence, reading_plan=None):
         additions = []
         wanted = labels(question)
         ranked = sorted((label not in wanted, -page["gap_candidates"].get(label, {}).get("score", 0),
-            page["page"], label) for page in pages for label in page["object_bboxes"]
+            page["page"], label) for page in pages for label in page["pixel_bboxes"]
             if label in wanted or label in page["gap_candidates"])
         chosen = {(number, label) for _, _, number, label in ranked[:2]}
         for page in pages:
@@ -284,7 +315,7 @@ async def prepare_visual(tasks, item, evidence, reading_plan=None):
 
 async def _transcribe_crop(tasks, paper_id, page, label):
     bbox = page["object_bboxes"][label]
-    data = await asyncio.to_thread(_crop_png, page, bbox)
+    data = await asyncio.to_thread(_crop_png, page, label)
     crop_version = hashlib.sha256(data).hexdigest()
     object_id = f"{paper_id}:visual-object:{label}"
     previous = []
@@ -307,6 +338,7 @@ async def _transcribe_crop(tasks, paper_id, page, label):
     for offset in range(0, len(result.text), 4000):
         spans.append(EvidenceSpan(id=f"{object_id}:ocr:{offset}@{version}", paper_id=paper_id, version=version,
             text=result.text[offset:offset+4000], source_level="full_text", page_start=page["page"], page_end=page["page"],
+            bbox=bbox, source_version=page["source_version"], reading_order=page["object_reading_order"].get(label),
             section=f"{label} 图表转录", modality="visual_transcription", view_type="ocr",
             visual_object_ids=[object_id], crop_version=crop_version, crop_source_version=page["source_version"],
             image_version=page["image_version"], transcription_uncertainties=result.uncertainties))
