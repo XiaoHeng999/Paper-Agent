@@ -17,3 +17,6 @@ dependencies = [
     "pypdfium2>=5.15.2",
     "uvicorn>=0.35.0",
 ]
+
+[project.optional-dependencies]
+image-retrieval = ["numpy>=1.26", "onnxruntime>=1.17", "tokenizers>=0.20"]

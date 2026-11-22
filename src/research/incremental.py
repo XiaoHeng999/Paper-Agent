@@ -8,10 +8,11 @@ from .models import PaperCard, AnalysisRelation, VerificationResult, version_of
 def policy_version(tasks, question, retrieval):
     return version_of({"engine": "research-v9-multimodal-objects",
         "implementation": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("agents.py", "context.py", "visual.py", "multimodal.py", "claims.py", "scheduling.py", "assessment.py", "writing.py", "provenance.py", "workflow.py", "models.py", "planning.py", "selection.py", "incremental.py", "argumentation.py", "storage.py", "supplement.py")}, "model": getattr(tasks.llm, "signature", None),
+            for name in ("agents.py", "context.py", "visual.py", "image_retrieval.py", "multimodal.py", "claims.py", "scheduling.py", "assessment.py", "writing.py", "provenance.py", "workflow.py", "models.py", "planning.py", "selection.py", "incremental.py", "argumentation.py", "storage.py", "supplement.py")}, "model": getattr(tasks.llm, "signature", None),
         "question": question, "context_chars": tasks.options.context_chars,
         "repair_rounds": tasks.options.max_repair_rounds, "reasoning": tasks.options.reasoning_enabled, "external": tasks.options.allow_external_search, "visual": tasks.options.visual_verification,
         "evidence_reranking": tasks.options.evidence_reranking_enabled,
+        "image_embedding": tasks.image_index.signature() if getattr(tasks, "image_index", None) else None,
         "visual_limit": tasks.options.visual_page_limit, "retrieval": getattr(retrieval, "collection", None)})
 
 

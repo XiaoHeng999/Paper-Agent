@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from .image_retrieval import visual_gap
 from .multimodal import find_object_labels
 from .models import (
     EvidenceCandidateTrace, EvidencePacket, IncrementJudgmentBatch, NodeJudgmentBatch,
@@ -67,6 +68,18 @@ async def build_evidence_packets(scope, plan: ReadingPlan, tasks, *, per_packet_
             if gap_hits:
                 ranked = _merge_gap_hits(ranked, gap_hits)
                 packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
+        index = getattr(tasks, "image_index", None)
+        if index and visual_gap(subquery, packet, scope):
+            try:
+                hits = await index.search(subquery, scope, tasks.visual_pages)
+                if hits:
+                    ranked = _merge_gap_hits(ranked, hits, "image_embedding")
+                    packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
+            except ValueError as exc:
+                warning = f"图像向量不可用，保留文本检索结果：{exc}"
+                warnings = tasks.reranking_warnings.setdefault(plan.paper_id, [])
+                if warning not in warnings:
+                    warnings.append(warning)
         packets.append(packet)
     return packets
 
@@ -311,12 +324,12 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths):
     return EvidencePacket(id=f"packet:{version}", version=version, **payload)
 
 
-def _merge_gap_hits(ranked, hits):
+def _merge_gap_hits(ranked, hits, channel="gap_dense"):
     values = {span.id: [span, score, set(channels)] for span, score, channels in ranked}
     for rank, span in enumerate(hits, start=1):
         current = values.setdefault(span.id, [span, 0.0, set()])
         current[1] += 1 / (_RRF_OFFSET + rank)
-        current[2].add("gap_dense")
+        current[2].add(channel)
     return [(span, score, sorted(channels)) for span, score, channels in
         sorted(values.values(), key=lambda item: (-item[1], item[0].id))[:40]]
 

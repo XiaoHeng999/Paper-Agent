@@ -742,6 +742,10 @@ Evidence Packet 现在为关系扩展命中的候选记录一条实际检索路�
 
 对于带显式实验编号的设置、消融和局限，第二跳也可以用同一编号和目标段落的直接标记建立关系。如果两端都给出实验编号但编号不同或不唯一，共享图表编号也不会触发这条扩展。对系统推论，如果已选第二跳终点被对应子问题的 Claim 引用，核查时会补读路径起点和中间节点；单篇卡片列出边、依据及链路判断。受控样例可运行 `python -m evaluation.multihop_retrieval` 检查正确路径和误连。
 
+可选图像通道使用本地量化 CLIP，仅在用户子问题有视觉缺口时对当前论文最多八个已定位对象排序。图片向量在本次任务中复用，前两个对象的证据进入 RRF；模型不可用时在卡片写入告警并继续原检索。默认关闭。在运行环境将 `PAPER_AGENT_CLIP_DIR` 指向存放下列四个文件的目录，研究任务约束设置 `image_embedding_enabled: true` 即可启用。
+
+模型使用 Xenova/clip-vit-base-patch32 的固定 revision `6b7c523703ae26e39be4b03774966f8571c7f523`。将该 revision 的 `onnx/text_model_quantized.onnx`、`onnx/vision_model_quantized.onnx`、`preprocessor_config.json`、`tokenizer.json` 放在同一目录内。运行时核对 SHA-256，不需要远程推理。使用 `python -m evaluation.visual_retrieval <PDF路径>` 可复现真实论文的三图对照；输入 PDF 的 SHA-256 必须与标注一致。该评测比较 Caption 检索与加上图像通道的首个证据对象，不衡量最终回答质量。
+
 ### 已实现
 
 - ReadingSubquery 和 Evidence Requirements；
@@ -771,7 +775,7 @@ Evidence Packet 现在为关系扩展命中的候选记录一条实际检索路�
 - 独立绘制的矢量路径聚类、复杂多面板图表的对象级 crop；
 - 合并表头、跨页表格及脚注适用范围的结构化解析；
 - 覆盖更多需求种类与复杂版面的 JIT OCR 调度；
-- 临时 image embedding；
+- 更大样本的图像通道 A/B 与端到端回答质量评测；
 - `condition_of`、`limitation_of` 等语义边；
 - 实体、指代和实验配置对齐；
 - 完整多跳 Evidence Chain Verifier；

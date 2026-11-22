@@ -717,6 +717,8 @@ def run_research_node():
             "calls": tasks.calls, "usage": tasks.usage, "retrieval": retrieval_status, "external_search": external_search,
             "revision_history": revision_history}
         report['role_stats'] = tasks.role_stats
+        if tasks.image_index:
+            report['image_embedding'] = tasks.image_index.audit
         report['recovery_trace'] = tasks.recovery_trace
         if synthesis_checkpoint:
             report['checkpoint_id'] = synthesis_checkpoint['id']

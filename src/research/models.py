@@ -25,6 +25,7 @@ class ResearchOptions:
     reasoning_enabled: bool = True
     visual_verification: bool = True
     visual_page_limit: int = 6
+    image_embedding_enabled: bool = False
     evidence_reranking_enabled: bool = False
     scoring_goal: str = ""
     score_weights: dict[str, float] = field(default_factory=dict)
@@ -73,6 +74,9 @@ class ResearchOptions:
             raise ValueError("计算总分前必须明确 scoring_goal")
         visual = constraints.get("visual_verification", True)
         reranking = constraints.get("evidence_reranking_enabled", False)
+        image_embedding = constraints.get("image_embedding_enabled", False)
+        if type(image_embedding) is not bool:
+            raise ValueError("image_embedding_enabled 必须是布尔值")
         page_limit = constraints.get("visual_page_limit", 6)
         if type(visual) is not bool or type(reranking) is not bool or type(page_limit) is not int or not 1 <= page_limit <= 20:
             raise ValueError("visual_verification 和 evidence_reranking_enabled 必须是布尔值，visual_page_limit 必须为 1–20")
@@ -85,7 +89,7 @@ class ResearchOptions:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"research_{key} 必须是 {low} 到 {high} 的整数")
             limits[key] = value
-        return cls(reasoning_enabled=reasoning, visual_verification=visual,
+        return cls(image_embedding_enabled=image_embedding, reasoning_enabled=reasoning, visual_verification=visual,
             evidence_reranking_enabled=reranking, visual_page_limit=page_limit,
             output_mode=mode, cross_paper_enabled=enabled, allow_external_search=external,
             external_paper_limit=external_limit, scoring_goal=goal.strip(), score_weights=weights, **limits)
@@ -162,7 +166,7 @@ class RetrievalHop(Record):
 class EvidenceCandidateTrace(Record):
     retrieval_path: list[RetrievalHop] = Field(default_factory=list, max_length=2)
     evidence_id: str
-    retrieval_channels: list[Literal["dense", "gap_dense", "lexical", "section", "exact_reference", "requirement", "relation", "fallback"]]
+    retrieval_channels: list[Literal["dense", "gap_dense", "image_embedding", "lexical", "section", "exact_reference", "requirement", "relation", "fallback"]]
     fused_score: float = Field(ge=0)
     matched_requirements: list[str] = Field(default_factory=list)
     relation: Literal["anchor", "adjacent", "same_parent", "same_object", "independent"] = "independent"

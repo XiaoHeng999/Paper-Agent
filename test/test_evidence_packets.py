@@ -123,6 +123,26 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         metrics = await evaluate()
         self.assertTrue(all(case["passed"] for case in metrics["cases"]), metrics)
 
+    async def test_optional_image_channel_is_scoped_and_fails_back_to_text(self):
+        oid = "p1:visual-object:figure:1"
+        span = EvidenceSpan(id="caption", paper_id="p1", version="1", text="Figure 1: Results.",
+            source_level="full_text", visual_object_ids=[oid], view_type="caption")
+        scope = ScopedEvidence([span], {"p1"})
+        query = subquery(["figure"], "Which figure contains dashed curves?")
+        tasks = ModelTasks(None, ResearchOptions(image_embedding_enabled=True))
+        tasks.visual_pages = {("p1", 1): {"pixel_bboxes": {"figure:1": [0,0,2,2]}},
+            ("p2", 1): {"pixel_bboxes": {"figure:1": [0,0,2,2]}}}
+        with patch.object(tasks.image_index, "_rank", return_value=([(oid, .8)], 1)) as rank:
+            packet, = await build_evidence_packets(scope, plan(query), tasks)
+        candidates = rank.call_args.args[1]
+        self.assertEqual([item[0] for item in candidates], [oid])
+        self.assertIn("image_embedding", packet.candidate_trace[0].retrieval_channels)
+        with patch.object(tasks.image_index, "_rank", side_effect=ValueError("unavailable")):
+            packet, = await build_evidence_packets(scope, plan(query), tasks)
+        self.assertEqual(packet.evidence_ids, ["caption"])
+        self.assertNotIn("image_embedding", packet.candidate_trace[0].retrieval_channels)
+        self.assertTrue(tasks.reranking_warnings["p1"])
+
     async def test_exact_reference_channel_is_auditable(self):
         table = EvidenceSpan(id="table", paper_id="p1", version="1", source_level="full_text",
             text="Table 2 reports latency and accuracy results.", section="Results")

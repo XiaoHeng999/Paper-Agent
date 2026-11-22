@@ -9,6 +9,7 @@ from typing import Any
 
 from src.llm.base import normalize_token_usage
 from .context import ScopedEvidence
+from .image_retrieval import ClipIndex
 from .models import (
     Claim, ClaimDraft, ClaimBatch, FocusedClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
     VerificationResult, ResearchOptions, version_of,
@@ -27,6 +28,7 @@ class ModelTasks:
     def __init__(self, llm: Any, options: ResearchOptions, cancellation=None, usage_callback=None):
         self.llm, self.options = llm, options
         self.cancellation, self.usage_callback = cancellation, usage_callback
+        self.image_index = ClipIndex() if options.image_embedding_enabled else None
         self.visual_pages = {}
         self.visual_catalog = {}
         self.reading_gaps = {}

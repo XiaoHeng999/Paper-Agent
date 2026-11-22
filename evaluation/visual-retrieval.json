@@ -1,0 +1,21 @@
+{
+  "paper_id": "2610.14672v1",
+  "source_version": "59d8f5473682724fd8bd07e35b8fef7db2743a2418a971be08fb06114bbc77d4",
+  "cases": [
+    {
+      "id": "heatmap",
+      "question": "Which figure displays a yellow and dark blue heatmap matrix?",
+      "label": "figure:1"
+    },
+    {
+      "id": "diagram",
+      "question": "Which figure is a wide architecture diagram with red and blue boxes connected by arrows?",
+      "label": "figure:2"
+    },
+    {
+      "id": "bars",
+      "question": "Which figure combines a red and blue bar chart with a line that rises sharply?",
+      "label": "figure:3"
+    }
+  ]
+}
