@@ -18,16 +18,21 @@
 
 ## 当前实现状态（2026-11-22）
 
-本轮已经完成可独立验证的第一阶段，并落地了第二阶段的文本结构基础：
+当前已经完成可独立验证的第一阶段、第二阶段的文本结构基础，以及第三阶段的首个可运行版本：
 
 - 已增加确定性的 `PaperReadingPlanner`，把普通 prompt 分为 `open_ended`、`guided`、`targeted`，并生成有上限的阅读子问题；
 - 已将 ReadingPlan 接入逐篇召回、Reader 提示、claim 绑定、缓存版本和报告覆盖状态；
 - 已由“单个原始 topic 做一次 Top-K”改为“逐子问题召回后轮转合并”，embedding 不可用时保留词法回退；
 - 已将默认文本切分器升级为 `StructureAwareChunker`，优先保留页码、章节、段落和句子边界，并记录 overlap、父段及前后邻接；
 - 已让证据存储和上下文扩展读取显式前后关系，同时保留旧数据的位置回退路径；
-- 已补充规划、切分、关系保留和工作流接入测试，完整测试集通过。
+- 已实现 dense、词法、章节、精确编号和 evidence requirement 五路召回，并用 RRF 融合；
+- 已对高分 seed 执行有界前后邻接和同父节点扩展，保留每个候选的召回通道及相对 Anchor 关系；
+- 已实现覆盖式贪心 Evidence Packet，在字符和节点预算内优先补齐条件、限制与负面结果；
+- 已将 Packet 接入 Reader、缓存和报告，Reader 只能看到当前调用实际提供的 Packet 证据；
+- 已对仍有缺口的 Packet 执行至多一轮 gap dense retrieval，并保留未满足需求和 repair query；
+- 已补充规划、切分、关系、混合召回、组包和工作流接入测试。
 
-尚未完成的部分不能视为已经具备：layout-aware PDF parser、Caption/表格/公式对象化、OCR 多视图、混合排序、Evidence Packet 覆盖式选择、gap-driven reread，以及 Node/Increment Verifier。本轮的 coverage 因而采用保守语义：claim 命中只能把子问题标为 `partial`，不能在缺少 requirement 级证据包时声称 `covered`。
+尚未完成的部分不能视为已经具备：layout-aware PDF parser、Caption/表格/公式对象化、OCR/图像 embedding 多视图、模型化 Node/Increment Verifier，以及完整视觉对象检索。当前 requirement 识别仍是确定性候选分类，不等于事实核查；只有 Reader 产生关联 claim 且 Packet 没有需求缺口时，子问题才会标为 `covered`。
 
 ---
 

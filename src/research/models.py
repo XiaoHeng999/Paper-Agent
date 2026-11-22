@@ -142,7 +142,31 @@ class SubqueryCoverage(Record):
     subquery_id: str
     status: Literal["covered", "partial", "unanswered"]
     claim_ids: list[str] = Field(default_factory=list)
+    covered_requirements: list[str] = Field(default_factory=list)
     missing_requirements: list[str] = Field(default_factory=list)
+
+
+class EvidenceCandidateTrace(Record):
+    evidence_id: str
+    retrieval_channels: list[Literal["dense", "gap_dense", "lexical", "section", "exact_reference", "requirement", "relation", "fallback"]]
+    fused_score: float = Field(ge=0)
+    matched_requirements: list[str] = Field(default_factory=list)
+    relation: Literal["anchor", "adjacent", "same_parent", "independent"] = "independent"
+    anchor_id: str = ""
+
+
+class EvidencePacket(Record):
+    id: str
+    subquery_id: str
+    question: str
+    evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+    anchor_id: str = ""
+    covered_requirements: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
+    repair_queries: list[str] = Field(default_factory=list, max_length=4)
+    candidate_trace: list[EvidenceCandidateTrace] = Field(default_factory=list, max_length=40)
+    selection_policy: str = "rrf-relation-greedy-v1"
+    version: str
 
 
 class JudgmentCheck(Record):
@@ -319,6 +343,7 @@ class PaperCard(Record):
     warnings: list[str] = Field(default_factory=list)
     omitted_evidence_ids: list[str] = Field(default_factory=list)
     reading_plan: ReadingPlan | None = None
+    evidence_packets: list[EvidencePacket] = Field(default_factory=list)
     subquery_coverage: list[SubqueryCoverage] = Field(default_factory=list)
 
 

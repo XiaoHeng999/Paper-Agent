@@ -11,6 +11,8 @@ from src.llm.base import normalize_token_usage
 from src.repositories.chroma.vector_store import VectorUpsertItem, make_chroma_store
 from .models import version_of
 
+_INDEX_POLICY = "evidence-views-v2"
+
 
 class EvidenceIndex:
     def __init__(self, snapshot, path, collection, *, dimensions=None, batch_size=32, owned=False):
@@ -20,7 +22,7 @@ class EvidenceIndex:
         self.batch_size = max(1, batch_size)
         self.owned = owned
         # Model/dimension changes must not mix incompatible vectors in one collection.
-        self.collection = collection + "_evidence_" + version_of([snapshot.signature, dimensions])[:12]
+        self.collection = collection + "_evidence_" + version_of([snapshot.signature, dimensions, _INDEX_POLICY])[:12]
         self.ready = set()
         self.warnings = []
         self.queries = 0
@@ -81,6 +83,9 @@ class EvidenceIndex:
                 records = [VectorUpsertItem(id=key, embedding=v, document=s.text,
                            metadata={"paper_id": s.paper_id, "evidence_id": s.id, "version": s.version,
                                      "corpus": corpus, "source_level": s.source_level,
+                                     "node_id": s.parent_id or s.id, "view_type": s.modality,
+                                     "section_path": s.section or "", "object_type":
+                                     ("visual" if s.modality == "visual_transcription" else "text"),
                                      "page_start": s.page_start or 0, "page_end": s.page_end or 0})
                            for (key, s), v in zip(missing, vectors, strict=True)]
                 await asyncio.to_thread(self._store, lambda store: store.upsert(records))

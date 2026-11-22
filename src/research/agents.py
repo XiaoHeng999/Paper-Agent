@@ -11,7 +11,7 @@ from .context import ScopedEvidence
 from .models import (
     Claim, ClaimDraft, ClaimBatch, FocusedClaimBatch, AnalysisRelation, RelationBatch, VerificationDraft,
     VerificationResult, ResearchOptions, version_of,
-    ReportParagraph, ComparisonAxis, AXES, ReadingPlan,
+    ReportParagraph, ComparisonAxis, AXES, EvidencePacket, ReadingPlan,
 )
 from .planning import assign_subqueries
 
@@ -106,7 +106,7 @@ class ModelTasks:
 
 async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: ScopedEvidence,
         evidence_ids: list[str], feedback: str = "", *, core_questions: dict[str, str] | None = None,
-        reading_plan: ReadingPlan | None = None) -> list[Claim]:
+        reading_plan: ReadingPlan | None = None, evidence_packets: list[EvidencePacket] | None = None) -> list[Claim]:
     evidence = spans.read(evidence_ids)
     remaining = tasks.options.context_chars - sum(len(e.text) for e in evidence)
     anchors = []
@@ -120,11 +120,13 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
     schema = ClaimDraft if feedback else FocusedClaimBatch if core_questions is not None else ClaimBatch
     focus = ("根据用户问题选出最多两个最影响结论、且现有证据可审查的不同问题，写入 core_questions，"
              "算法论文的一般性阅读或方法类提问，优先保留一个可回查的核心设计问题；用户指定只看特定结果时遵循其范围。用从零开始的 claim_index 关联 claims；按重要性排序。") if core_questions is not None else ""
-    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。算法论文须抽取方法判断：沿同一输入追踪实际操作、输出及下一步用途，定位关键公式、近似前提和机制消融。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。只引用本次提供的证据 ID。reading_plan 是问题规划而不是事实来源；每条判断用 subquery_ids 关联其实际回答的已提供子问题，不能为了覆盖计划而编造判断。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。" + focus, {
+    packet_views = _packet_views(evidence_packets or [], supplied_ids)
+    batch = await tasks.ask("paper_reader", "逐条抽取当前论文的研究问题、方法、结果、成立前提、局限。算法论文须抽取方法判断：沿同一输入追踪实际操作、输出及下一步用途，定位关键公式、近似前提和机制消融。每条只表达一个判断。保留数字、实验条件、基线和限定语；区分作者报告和系统推断，未知条件写 unknown。study 逐项记录问题、机制、任务、数据、基线、指标、预算、样本量、消融、负面结果及实现信息；不得将未报告写为没有。只围绕 primary_evidence_ids 抽取判断；context_evidence 是从其他分块补入的前提/限制，必须检查是否限定当前结果并引用依据。evidence_packets 只是检索与组包轨迹，不是事实或核查结论；优先检查 Anchor、条件和限制，但只能引用本次实际提供的证据 ID。未完成抽取的主证据放入 uncovered_evidence_ids，达到条数上限不能假装穷尽。reading_plan 是问题规划而不是事实来源；每条判断用 subquery_ids 关联其实际回答的已提供子问题，不能为了覆盖计划而编造判断。针对反馈修正时只返回一个 ClaimDraft 对象，保持原判断身份，不重新抽取其他判断。正常抽取最多25条，剩余证据必须标记未覆盖。不能用跨篇知识补全。" + focus, {
         "question": question, "paper_id": paper_id,
         "evidence": [item.model_dump() for item in evidence], "context_evidence": [item.model_dump() for item in anchors],
         "primary_evidence_ids": evidence_ids, "feedback": feedback,
         "reading_plan": reading_plan.model_dump() if reading_plan else None,
+        "evidence_packets": packet_views,
     }, schema)
     if feedback:
         batch = ClaimBatch(claims=[batch])
@@ -152,6 +154,27 @@ async def read_claims(tasks: ModelTasks, question: str, paper_id: str, spans: Sc
             target = next((c for c in claims if c.kind == "result"), claims[0])
             core_questions[target.id] = question
     return claims
+
+
+def _packet_views(packets: list[EvidencePacket], supplied_ids: set[str]) -> list[dict]:
+    """Project packet traces to evidence actually present in this model call."""
+
+    result = []
+    for packet in packets:
+        evidence_ids = [value for value in packet.evidence_ids if value in supplied_ids]
+        if not evidence_ids:
+            continue
+        trace = [item for item in packet.candidate_trace if item.evidence_id in evidence_ids]
+        covered = list(dict.fromkeys(kind for item in trace for kind in item.matched_requirements))
+        requirements = list(dict.fromkeys([*packet.covered_requirements, *packet.missing_requirements]))
+        result.append({"id": packet.id, "subquery_id": packet.subquery_id,
+            "question": packet.question, "evidence_ids": evidence_ids,
+            "anchor_id": packet.anchor_id if packet.anchor_id in supplied_ids else "",
+            "covered_requirements": covered,
+            "missing_requirements": [kind for kind in requirements if kind not in covered],
+            "candidate_trace": [item.model_dump() for item in trace],
+            "selection_policy": packet.selection_policy, "version": packet.version})
+    return result
 
 
 async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportParagraph, evidence: ScopedEvidence, claims: list[Claim] | None = None, *, relations=None) -> VerificationResult:

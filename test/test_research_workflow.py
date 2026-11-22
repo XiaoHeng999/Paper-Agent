@@ -105,8 +105,13 @@ class ResearchWorkflowTest(unittest.IsolatedAsyncioTestCase):
         card = result["research_report"]["cards"][0]
         self.assertTrue(card["reading_plan"]["subqueries"])
         self.assertTrue(card["claims"][0]["subquery_ids"])
+        self.assertTrue(card["evidence_packets"])
         self.assertTrue(card["subquery_coverage"])
         self.assertEqual(model.requests[0]["reading_plan"]["paper_id"], "p1")
+        supplied = {item["id"] for item in [*model.requests[0]["evidence"], *model.requests[0]["context_evidence"]]}
+        for packet in model.requests[0]["evidence_packets"]:
+            self.assertLessEqual(set(packet["evidence_ids"]), supplied)
+            self.assertLessEqual({item["evidence_id"] for item in packet["candidate_trace"]}, supplied)
 
     async def test_many_papers_no_cross_context_leak(self):
         model = FakeModel()

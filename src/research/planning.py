@@ -10,7 +10,7 @@ import re
 from collections import Counter
 
 from .models import (
-    Claim, EvidenceRequirement, ReadingPlan, ReadingSubquery, SubqueryCoverage,
+    Claim, EvidencePacket, EvidenceRequirement, ReadingPlan, ReadingSubquery, SubqueryCoverage,
     version_of,
 )
 
@@ -130,18 +130,23 @@ async def prioritize_for_plan(scope, plan: ReadingPlan, tasks, per_query: int = 
     return ordered
 
 
-def coverage_for_plan(plan: ReadingPlan, claims: list[Claim]) -> list[SubqueryCoverage]:
-    """Expose plan coverage without pretending that a linked claim satisfies every requirement."""
+def coverage_for_plan(plan: ReadingPlan, claims: list[Claim], packets: list[EvidencePacket] | None = None) -> list[SubqueryCoverage]:
+    """Combine verified extraction linkage with packet-level candidate coverage."""
 
+    packet_by_subquery = {packet.subquery_id: packet for packet in packets or []}
     result = []
     for item in plan.subqueries:
         linked = [claim for claim in claims if item.id in claim.subquery_ids]
-        # Requirement-level satisfaction needs typed evidence packets (Phase 3).  Until then,
-        # linked claims are explicitly partial rather than falsely marked complete.
+        packet = packet_by_subquery.get(item.id)
+        covered = packet.covered_requirements if packet else []
+        missing = packet.missing_requirements if packet else [requirement.kind for requirement in item.evidence_requirements]
+        # Packet matching identifies candidate evidence types, while a linked Reader claim is
+        # still required before a question can be reported as covered.
+        status = "unanswered" if not linked else "covered" if packet and not missing else "partial"
         result.append(SubqueryCoverage(subquery_id=item.id,
-            status="partial" if linked else "unanswered",
+            status=status,
             claim_ids=[claim.id for claim in linked],
-            missing_requirements=[requirement.kind for requirement in item.evidence_requirements]))
+            covered_requirements=covered, missing_requirements=missing))
     return result
 
 
