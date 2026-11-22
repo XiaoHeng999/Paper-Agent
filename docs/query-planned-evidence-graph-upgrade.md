@@ -30,9 +30,20 @@
 - 已实现覆盖式贪心 Evidence Packet，在字符和节点预算内优先补齐条件、限制与负面结果；
 - 已将 Packet 接入 Reader、缓存和报告，Reader 只能看到当前调用实际提供的 Packet 证据；
 - 已对仍有缺口的 Packet 执行至多一轮 gap dense retrieval，并保留未满足需求和 repair query；
+- 已建立 Figure/Table/Equation canonical object，将 Caption、OCR、正文引用和页面图像版本组织为独立 view；
+- 已支持从文本命中沿 `same_object` 扩展到 Caption/OCR/讨论证据，并将 canonical object ID 写入向量索引；
+- 已实现可选的 listwise Node/Increment Verifier：每篇最多两次调用，过滤 irrelevant/redundant，同时强制保留 conflict 和 limitation；
 - 已补充规划、切分、关系、混合召回、组包和工作流接入测试。
 
-尚未完成的部分不能视为已经具备：layout-aware PDF parser、Caption/表格/公式对象化、OCR/图像 embedding 多视图、模型化 Node/Increment Verifier，以及完整视觉对象检索。当前 requirement 识别仍是确定性候选分类，不等于事实核查；只有 Reader 产生关联 claim 且 Packet 没有需求缺口时，子问题才会标为 `covered`。
+尚未完成的部分不能视为已经具备：layout-aware PDF parser 提供的可靠 bbox/reading order、对象级图片裁剪、图像 embedding，以及复杂表格单元格结构。当前无法可靠定位 bbox 时会显式保存 `bbox=null` 并继续使用匹配版本的整页原图，不能声称已经完成对象裁剪。requirement 识别和 Node/Increment 判断也不等于事实核查；只有 Reader 产生关联 claim 且 Packet 没有需求缺口时，子问题才会标为 `covered`。
+
+模型化重排默认关闭，以避免未经评测就增加成本。调用方可在研究约束中设置：
+
+```json
+{"evidence_reranking_enabled": true}
+```
+
+启用后 Node Verifier 与 Increment Verifier 各使用一次 listwise 调用；失败时记录 warning 并回退到确定性 Packet，不中断论文阅读。
 
 ---
 

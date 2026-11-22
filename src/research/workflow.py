@@ -17,7 +17,8 @@ from .provenance import document_version, source_manifest
 from .scheduling import comparison_schedule
 from .claims import merge_duplicate
 from .planning import build_reading_plan, coverage_for_plan
-from .selection import build_evidence_packets, packet_priority
+from .selection import build_evidence_packets, packet_priority, refine_packets_with_model
+from .multimodal import build_multimodal_catalog
 from .reasoning import plan_arguments, research_questions, check_local_gap, synthesize, render_reasoning, review_core_question, render_core_review
 from .incremental import IncrementalPlan, policy_version, dependency_manifest
 
@@ -138,6 +139,7 @@ def run_research_node():
         visual_audits = []
         source_manifests = {}
         reading_plans = {}
+        visual_objects = {}
         seen = set()
         async def prepare_input(item):
             paper = item.get("paper", {})
@@ -154,6 +156,9 @@ def run_research_node():
                 load_error = f"原文准备失败，未生成判断：{exc}"
             document_before = await asyncio.to_thread(document_version, item)
             evidence, visual_audit = await prepare_visual(tasks, item, evidence)
+            evidence, objects = build_multimodal_catalog(evidence,
+                tasks.visual_catalog.get(paper_id, []), tasks.visual_pages)
+            visual_objects[paper_id] = objects
             if str(item.get("full_text", {}).get("source_path", "")).lower().endswith(".pdf"):
                 tasks.remaining_visual_papers = max(0, tasks.remaining_visual_papers - 1)
             document_after = await asyncio.to_thread(document_version, item)
@@ -224,6 +229,7 @@ def run_research_node():
                     return reused_card
                 evidence_packets = await build_evidence_packets(scope, reading_plan, tasks,
                     per_packet_chars=min(4200, options.context_chars)) if evidence else []
+                evidence_packets = await refine_packets_with_model(tasks, scope, evidence_packets)
                 revised_claims = None
                 paper_revision = revision if revision and revision["target"]["paper_id"] == paper_id else None
                 if paper_revision:
@@ -236,9 +242,10 @@ def run_research_node():
                     new_version = version_of({"claim": draft.model_dump(), "sources": [(e.id, e.version) for e in cited], "human_revision": old.version})
                     replacement = Claim(**draft.model_dump(), id=f"{paper_id}:claim:{new_version}", paper_id=paper_id, version=new_version)
                     revised_claims = [replacement if c.id == old.id else c for c in seed.claims]
-                cache_key = version_of({"schema": "paper-card-v8-evidence-packets", "prepared_version": version_of(prepared.model_dump()), "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
+                cache_key = version_of({"schema": "paper-card-v9-multimodal-objects", "prepared_version": version_of(prepared.model_dump()), "source_manifest": source_manifests[paper_id], "policy": policy, "revision": paper_revision, "retrieval": retrieval.collection if retrieval else None, "retrieval_ready": bool(retrieval and retrieval.key(evidence) in retrieval.ready), "question": request.topic,
                     "reading_plan": reading_plan.model_dump(),
                     "evidence_packets": [packet.model_dump() for packet in evidence_packets],
+                    "visual_objects": [value.model_dump() for value in visual_objects.get(paper_id, [])],
                     "paper": paper_id, "title": title, "evidence": [e.model_dump() for e in evidence],
                     "model": getattr(llm, "signature", "unknown"),
                     "context_chars": options.context_chars, "repair_rounds": options.max_repair_rounds})
@@ -255,7 +262,9 @@ def run_research_node():
                     except (ValueError, KeyError):
                         pass
                 card = PaperCard(paper_id=paper_id, title=title, version=cache_key,
-                    reading_plan=reading_plan, evidence_packets=evidence_packets)
+                    reading_plan=reading_plan, evidence_packets=evidence_packets,
+                    visual_objects=visual_objects.get(paper_id, []))
+                card.warnings.extend(tasks.reranking_warnings.get(paper_id, []))
                 for audit in visual_audits:
                     if audit["paper_id"] == paper_id:
                         card.warnings.extend(audit["warnings"])
@@ -680,8 +689,10 @@ def run_research_node():
             record = {k: v for k, v in revision.items() if k not in {"history", "seed_card", "evidence_versions"}}
             record["result_claims"] = [{"id": c.id, "version": c.version} for card in cards if card.paper_id == revision["target"]["paper_id"] for c in card.claims]
             revision_history = [*revision.get("history", []), record]
-        report = {"schema_version": 7, "prepared_papers": [p.model_dump() for p in inputs],
+        report = {"schema_version": 8, "prepared_papers": [p.model_dump() for p in inputs],
             "reading_plans": {paper_id: reading_plan.model_dump() for paper_id, reading_plan in reading_plans.items()},
+            "visual_objects": {paper_id: [value.model_dump() for value in objects]
+                for paper_id, objects in visual_objects.items()},
             "core_reviews": core_reviews,
             "first_core_review_seconds": min((s["elapsed_seconds"] for s in core_reviews), default=None), "primary_paper_ids": sorted(primary_ids), "research_questions": questions, "argument_plans": argument_plans, "reasoning": reasoning, "source_manifests": source_manifests, "execution_policy": policy, "incremental": plan.audit(),
             "dependencies": dependency_manifest(cards, relations, paragraphs, all_evidence, source_manifests),

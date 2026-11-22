@@ -1,13 +1,43 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from src.llm.base import LLMResponse
+from src.research.agents import ModelTasks
 from src.research.context import ScopedEvidence
 from src.research.models import (
-    Claim, EvidenceRequirement, EvidenceSpan, ReadingPlan, ReadingSubquery,
+    Claim, EvidenceRequirement, EvidenceSpan, ReadingPlan, ReadingSubquery, ResearchOptions,
 )
 from src.research.planning import coverage_for_plan
-from src.research.selection import build_evidence_packets, packet_priority
+from src.research.selection import build_evidence_packets, packet_priority, refine_packets_with_model
+
+
+class RerankingModel:
+    signature = "reranking-test"
+    provider = None
+
+    def __init__(self):
+        self.provider = self
+        self.roles = []
+
+    async def chat(self, messages, **kwargs):
+        payload = json.loads(messages[-1]["content"])
+        self.roles.append(payload["role"])
+        if payload["role"] == "node_verifier":
+            judgments = [{"subquery_id": item["subquery_id"], "evidence_id": item["evidence_id"],
+                "direct_support": 4 if item["evidence_id"] == "result" else 2,
+                "supported_requirements": item["candidate_requirements"], "reason": "listwise relevance"}
+                for item in payload["candidates"]]
+            return LLMResponse(content=json.dumps({"judgments": judgments}))
+        if payload["role"] == "increment_verifier":
+            judgments = [{"subquery_id": item["subquery_id"], "anchor_id": item["anchor_id"],
+                "evidence_id": item["evidence_id"],
+                "role": "redundant" if item["evidence_id"] == "duplicate" else "conflict",
+                "supported_requirements": item["candidate_requirements"], "reason": "increment role"}
+                for item in payload["candidates"]]
+            return LLMResponse(content=json.dumps({"judgments": judgments}))
+        raise AssertionError(payload["role"])
 
 
 def subquery(requirements, question="Does the latency result hold on the reported hardware?"):
@@ -93,6 +123,30 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         with_claim = coverage_for_plan(reading_plan, [claim], [packet])[0]
         self.assertEqual(with_claim.status, "covered")
         self.assertEqual(with_claim.missing_requirements, [])
+
+    async def test_optional_listwise_verifiers_remove_redundancy_and_keep_conflict(self):
+        spans = [
+            EvidenceSpan(id="result", paper_id="p1", version="1", source_level="full_text",
+                text="The result improves latency.", section="Results"),
+            EvidenceSpan(id="duplicate", paper_id="p1", version="1", source_level="full_text",
+                text="The reported result improves latency.", section="Abstract"),
+            EvidenceSpan(id="limitation", paper_id="p1", version="1", source_level="full_text",
+                text="A limitation is failure on long sequences.", section="Limitations"),
+        ]
+        scope = ScopedEvidence(spans, {"p1"})
+        scope.search = AsyncMock(return_value=[spans[0], spans[1]])
+        query = subquery(["result", "limitation", "hardware"])
+        model = RerankingModel()
+        tasks = ModelTasks(model, ResearchOptions(evidence_reranking_enabled=True, max_repair_rounds=0))
+        packets = await build_evidence_packets(scope, plan(query), tasks)
+        self.assertIn("duplicate", packets[0].evidence_ids)
+        refined = await refine_packets_with_model(tasks, scope, packets)
+        self.assertEqual(model.roles, ["node_verifier", "increment_verifier"])
+        self.assertNotIn("duplicate", refined[0].evidence_ids)
+        self.assertIn("limitation", refined[0].evidence_ids)
+        trace = {item.evidence_id: item for item in refined[0].candidate_trace}
+        self.assertEqual(trace["limitation"].incremental_role, "conflict")
+        self.assertEqual(trace["result"].direct_support, 4)
 
 
 if __name__ == "__main__":

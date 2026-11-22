@@ -9,7 +9,8 @@ import re
 from collections import defaultdict
 
 from .models import (
-    EvidenceCandidateTrace, EvidencePacket, ReadingPlan, ReadingSubquery, version_of,
+    EvidenceCandidateTrace, EvidencePacket, IncrementJudgmentBatch, NodeJudgmentBatch,
+    ReadingPlan, ReadingSubquery, version_of,
 )
 
 
@@ -71,6 +72,66 @@ def packet_priority(packets: list[EvidencePacket], scope) -> list:
     return scope.read(ids) if ids else []
 
 
+async def refine_packets_with_model(tasks, scope, packets: list[EvidencePacket]) -> list[EvidencePacket]:
+    """Optionally run two bounded listwise judgments; never replace factual verification."""
+
+    if not getattr(tasks.options, "evidence_reranking_enabled", False):
+        return packets
+    candidates = []
+    for packet in packets:
+        trace = {item.evidence_id: item for item in packet.candidate_trace}
+        for evidence_id in packet.evidence_ids:
+            span = scope.spans.get(evidence_id)
+            if span is None or evidence_id not in trace:
+                continue
+            candidates.append({"subquery_id": packet.subquery_id, "question": packet.question,
+                "evidence_id": evidence_id, "text": span.text[:3000], "section": span.section,
+                "view_type": span.view_type, "visual_object_ids": span.visual_object_ids,
+                "retrieval_channels": trace[evidence_id].retrieval_channels,
+                "candidate_requirements": trace[evidence_id].matched_requirements})
+    candidates = candidates[:40]
+    if not candidates:
+        return packets
+    allowed = {(item["subquery_id"], item["evidence_id"]) for item in candidates}
+    try:
+        nodes = await tasks.ask("node_verifier",
+            "逐项判断候选能否直接帮助回答对应子问题。0=无关，1=仅背景，2=部分相关，3=直接支持，4=关键直接证据。"
+            "只判断相关性和可能覆盖的证据需求，不判断论文主张真假；不得新增候选、需求或事实。", {
+                "candidates": candidates,
+            }, NodeJudgmentBatch)
+        if any((item.subquery_id, item.evidence_id) not in allowed for item in nodes.judgments):
+            raise ValueError("Node Verifier 返回了未提供的候选")
+        anchors = {}
+        node_lookup = {(item.subquery_id, item.evidence_id): item for item in nodes.judgments}
+        for packet in packets:
+            available = [evidence_id for evidence_id in packet.evidence_ids
+                if (packet.subquery_id, evidence_id) in node_lookup]
+            anchors[packet.subquery_id] = max(available,
+                key=lambda evidence_id: node_lookup[(packet.subquery_id, evidence_id)].direct_support,
+                default=packet.anchor_id)
+        increments_payload = []
+        for item in candidates:
+            anchor_id = anchors.get(item["subquery_id"], "")
+            if anchor_id and item["evidence_id"] != anchor_id:
+                increments_payload.append({**item, "anchor_id": anchor_id})
+        increments = await tasks.ask("increment_verifier",
+            "相对同一子问题的 Anchor，逐项判断候选的增量角色。conflict 和 clarification 即使相似度低也应明确标出；"
+            "redundant 表示没有新增信息，irrelevant 表示不能帮助当前问题。只返回已提供的组合。", {
+                "candidates": increments_payload[:40],
+            }, IncrementJudgmentBatch) if increments_payload else IncrementJudgmentBatch()
+        allowed_increments = {(item["subquery_id"], item["anchor_id"], item["evidence_id"])
+            for item in increments_payload[:40]}
+        if any((item.subquery_id, item.anchor_id, item.evidence_id) not in allowed_increments
+                for item in increments.judgments):
+            raise ValueError("Increment Verifier 返回了未提供的候选关系")
+        return _apply_model_judgments(packets, nodes, increments, anchors)
+    except (ValueError, RuntimeError, TimeoutError) as exc:
+        paper_id = next(iter(scope.allowed), "unknown")
+        tasks.reranking_warnings.setdefault(paper_id, []).append(
+            f"证据候选模型重排未完成，保留确定性 Packet：{exc}")
+        return packets
+
+
 async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     query = " ".join([subquery.question, *subquery.retrieval_queries])
     channels = {}
@@ -95,7 +156,11 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     seed_ids = [item[0] for item in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:4]]
     for seed_id in seed_ids:
         seed = scope.spans[seed_id]
-        related = [seed.previous_id, seed.next_id]
+        related = []
+        if seed.visual_object_ids:
+            related.extend(span.id for span in scope.spans.values() if span.id != seed.id
+                and set(seed.visual_object_ids) & set(span.visual_object_ids))
+        related.extend([seed.previous_id, seed.next_id])
         if seed.parent_id:
             related.extend(span.id for span in scope.spans.values()
                 if span.parent_id == seed.parent_id and span.id != seed.id)
@@ -170,6 +235,51 @@ def _merge_gap_hits(ranked, hits):
         sorted(values.values(), key=lambda item: (-item[1], item[0].id))[:40]]
 
 
+def _apply_model_judgments(packets, nodes, increments, anchors):
+    node_lookup = {(item.subquery_id, item.evidence_id): item for item in nodes.judgments}
+    increment_lookup = {(item.subquery_id, item.evidence_id): item for item in increments.judgments}
+    refined = []
+    role_order = {"conflict": 0, "clarification": 1, "new_fact": 2,
+        "corroboration": 3, None: 4, "redundant": 5, "irrelevant": 6}
+    for packet in packets:
+        total_requirements = list(dict.fromkeys([*packet.covered_requirements, *packet.missing_requirements]))
+        trace = []
+        for item in packet.candidate_trace:
+            node = node_lookup.get((packet.subquery_id, item.evidence_id))
+            increment = increment_lookup.get((packet.subquery_id, item.evidence_id))
+            trace.append(item.model_copy(update={
+                "direct_support": node.direct_support if node else None,
+                "verifier_requirements": [value for value in (node.supported_requirements if node else [])
+                    if value in total_requirements],
+                "incremental_role": increment.role if increment else None,
+                "anchor_id": anchors.get(packet.subquery_id, packet.anchor_id)
+                    if item.evidence_id != anchors.get(packet.subquery_id, packet.anchor_id) else "",
+                "relation": "anchor" if item.evidence_id == anchors.get(packet.subquery_id, packet.anchor_id)
+                    else item.relation,
+            }))
+        selected_trace = [item for item in trace if item.evidence_id in packet.evidence_ids]
+        anchor_id = anchors.get(packet.subquery_id, packet.anchor_id)
+        keep = [item for item in selected_trace if item.evidence_id == anchor_id or
+            item.incremental_role not in {"irrelevant", "redundant"} or
+            {"limitation", "negative_result"} & set(item.matched_requirements)]
+        keep.sort(key=lambda item: (item.evidence_id != anchor_id,
+            role_order[item.incremental_role], -(item.direct_support or 0), -item.fused_score))
+        evidence_ids = [item.evidence_id for item in keep]
+        covered = list(dict.fromkeys(value for item in keep
+            for value in [*item.matched_requirements, *item.verifier_requirements]
+            if value in total_requirements))
+        missing = [value for value in total_requirements if value not in covered]
+        payload = packet.model_dump(exclude={"id", "version"})
+        payload.update(evidence_ids=evidence_ids, anchor_id=anchor_id,
+            covered_requirements=covered, missing_requirements=missing,
+            repair_queries=packet.repair_queries if missing else [],
+            candidate_trace=[item.model_dump() for item in trace],
+            selection_policy=packet.selection_policy + "+listwise-node-increment-v1")
+        version = version_of(payload)
+        refined.append(EvidencePacket(id=f"packet:{version}", version=version, **payload))
+    return refined
+
+
 def _matched_requirements(span, required):
     text = f"{span.section} {span.text}".casefold()
     return [kind for kind in required if any(term in text for term in _REQUIREMENT_TERMS.get(kind, ()))]
@@ -220,6 +330,8 @@ def _relation(anchor, span):
         return "adjacent"
     if anchor.parent_id and anchor.parent_id == span.parent_id:
         return "same_parent"
+    if set(anchor.visual_object_ids) & set(span.visual_object_ids):
+        return "same_object"
     return "independent"
 
 

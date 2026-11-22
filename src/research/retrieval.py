@@ -11,7 +11,7 @@ from src.llm.base import normalize_token_usage
 from src.repositories.chroma.vector_store import VectorUpsertItem, make_chroma_store
 from .models import version_of
 
-_INDEX_POLICY = "evidence-views-v2"
+_INDEX_POLICY = "evidence-views-v3-visual-objects"
 
 
 class EvidenceIndex:
@@ -83,7 +83,8 @@ class EvidenceIndex:
                 records = [VectorUpsertItem(id=key, embedding=v, document=s.text,
                            metadata={"paper_id": s.paper_id, "evidence_id": s.id, "version": s.version,
                                      "corpus": corpus, "source_level": s.source_level,
-                                     "node_id": s.parent_id or s.id, "view_type": s.modality,
+                                     "node_id": (s.visual_object_ids[0] if s.visual_object_ids else s.parent_id or s.id),
+                                     "view_type": s.view_type,
                                      "section_path": s.section or "", "object_type":
                                      ("visual" if s.modality == "visual_transcription" else "text"),
                                      "page_start": s.page_start or 0, "page_end": s.page_end or 0})

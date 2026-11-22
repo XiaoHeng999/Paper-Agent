@@ -30,6 +30,7 @@ class ModelTasks:
         self.visual_catalog = {}
         self.reading_gaps = {}
         self.visual_audit = []
+        self.reranking_warnings = {}
         self.calls = 0
         self.role_stats = {}
         self.recovery_trace = []
@@ -45,7 +46,8 @@ class ModelTasks:
             if self.terminal_error:
                 raise RuntimeError(self.terminal_error)
             remaining = self.deadline - time.monotonic()
-            reading = role in {'paper_reader', 'evidence_verifier', 'cross_paper_analyst', 'visual_transcription'}
+            reading = role in {'paper_reader', 'evidence_verifier', 'cross_paper_analyst',
+                'visual_transcription', 'node_verifier', 'increment_verifier'}
             if reading:
                 remaining -= getattr(self, 'reading_time_reserve', 0)
             call_limit = self.options.max_calls - (getattr(self, 'reading_call_reserve', 0) if reading else 0)
