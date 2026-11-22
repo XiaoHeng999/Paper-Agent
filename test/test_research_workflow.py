@@ -48,8 +48,11 @@ class FakeModel:
         elif role == "reasoning_verifier":
             value = {'checks': []}
         elif role == "evidence_verifier":
+            source = next(x for x in payload["evidence"] if x["id"] in payload["target"]["evidence_ids"])
             qualified = self.qualified and payload["target"].get("statement") == "有效"
             value = {"verdict": "qualified" if qualified else "verified", "reason": "原文仅支持小样本条件",
+                "fact_citations": [{"clause": clause, "evidence_id": source["id"], "quote": source["text"]}
+                    for clause in payload.get("checkable_clauses", [])],
                 "repair_request": "补充小样本前提" if qualified else "",
                 "evidence_ids": [x["id"] for x in payload["evidence"]],
                 "fidelity": {"status": "supported", "reason": "原文支持", "evidence_ids": [x["id"] for x in payload["evidence"]]},

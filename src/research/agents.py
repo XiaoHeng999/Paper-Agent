@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from src.llm.base import normalize_token_usage
+from .citation_checks import checkable_clauses, missing_fact_citations
 from .context import ScopedEvidence
 from .image_retrieval import ClipIndex, GmeIndex
 from .models import (
@@ -272,7 +273,11 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
             packet.subquery_id in target.subquery_ids and
             "baseline_precision" in [*packet.covered_requirements, *packet.missing_requirements]
             for packet in evidence_packets)
-        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对 reference_candidates 中影响理解的指代，只有原文能唯一定位对象时填写 resolved_references，提供候选 antecedent_id、逐字引句和引句中的指代对象名；存在歧义时留空。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐。判断 consistent 时在 quotes 中为三个证据 ID 分别填写逐字引句。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+        clauses = checkable_clauses(target.statement if hasattr(target, "statement") else target.rationale,
+            conditions=target.conditions if isinstance(target, Claim) else "",
+            limitation=isinstance(target, Claim) and target.kind == "limitation")
+        draft = await tasks.ask("evidence_verifier", "针对 checkable_clauses 每个分句填写 fact_citations，复制分句，只引用目标本身所引证据及逐字原文，同一实验的条件与数值必须对应；页码按原页元数据。如果倍数由两项测量相除得到，ratio 中填写引句中带相同单位的分子和分母。独立核查目标与原文。对 reference_candidates 中影响理解的指代，只有原文能唯一定位对象时填写 resolved_references，提供候选 antecedent_id、逐字引句和引句中的指代对象名；存在歧义时留空。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐。判断 consistent 时在 quotes 中为三个证据 ID 分别填写逐字引句。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+            "checkable_clauses": clauses,
             "reference_candidates": references,
             "precision_comparison_required": precision_required,
             "retrieval_chains": list(chains.values()),
@@ -411,6 +416,13 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                 draft.verdict = "qualified"
                 draft.reason += "；多跳证据的实验条件未确认"
                 draft.repair_request = draft.repair_request or "核对上述结果、基线和实验配置"
+        missing = missing_fact_citations(clauses, draft.fact_citations,
+            {span.id: span for span in raw if span.id in cited}, draft.visual_observations, getattr(target, "experiment", ""))
+        if missing:
+            draft.unchecked.extend("缺少对应事实的引用：" + clause for clause in missing)
+            if draft.verdict == "verified":
+                draft.verdict = "qualified"
+                draft.repair_request = "逐项核对上述分句的数值、实验条件和页码，并补上对应引用"
         if draft.verdict == "qualified" and not draft.repair_request.strip():
             raise ValueError("限定结论缺少修订要求")
         if visual_missing:

@@ -425,6 +425,10 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                 data = json.loads(response.content)
                 if p['role'] == 'paper_reader':
                     data['claims'][0]['statement'] = sentence
+                if p['role'] == 'evidence_verifier':
+                    for proof in data.get('fact_citations', []):
+                        if '5.08' in proof['clause']:
+                            proof['ratio'] = {'numerator': '866.9 s', 'denominator': '170.6 s'}
                 if p['role'] == 'argument_builder':
                     arg = data['arguments'][0]
                     arg['citation_draft'] = {

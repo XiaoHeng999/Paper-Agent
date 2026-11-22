@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 from pathlib import Path
 
 from src.llm import ModelConfig, SystemConfig, make_provider
@@ -15,14 +16,14 @@ _INDEX_POLICY = "evidence-views-v3-visual-objects"
 
 
 class EvidenceIndex:
-    def __init__(self, snapshot, path, collection, *, dimensions=None, batch_size=32, owned=False):
+    def __init__(self, snapshot, path, collection, *, dimensions=None, batch_size=32, owned=False, model_signature=None):
         self.snapshot = snapshot
         self.path = path
         self.dimensions = dimensions
         self.batch_size = max(1, batch_size)
         self.owned = owned
         # Model/dimension changes must not mix incompatible vectors in one collection.
-        self.collection = collection + "_evidence_" + version_of([snapshot.signature, dimensions, _INDEX_POLICY])[:12]
+        self.collection = collection + "_evidence_" + version_of([model_signature or snapshot.signature, dimensions, _INDEX_POLICY])[:12]
         self.ready = set()
         self.warnings = []
         self.queries = 0
@@ -32,6 +33,10 @@ class EvidenceIndex:
 
     @classmethod
     def from_config(cls):
+        local = os.environ.get("PAPER_AGENT_TEXT_E5_DIR")
+        if local:
+            read = SystemConfig.load().read
+            return LocalE5Index(local, read.vector_store_path, read.vector_store_collection)
         path = Path("config/model.json")
         if not path.is_file():
             return None
@@ -46,7 +51,7 @@ class EvidenceIndex:
     def key(self, spans):
         return version_of(sorted((s.id, s.version) for s in spans))
 
-    async def embed(self, texts):
+    async def embed(self, texts, *, query=False):
         vectors = []
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start:start + self.batch_size]
@@ -102,7 +107,7 @@ class EvidenceIndex:
         ):
             return results
         async with self.semaphore:
-            vectors = await self.embed([query])
+            vectors = await self.embed([query], query=True)
             self.queries += 1
             for paper_id in sorted(scope.allowed):
                 spans = [s for s in scope.spans.values() if s.paper_id == paper_id]
@@ -129,3 +134,43 @@ class EvidenceIndex:
     async def aclose(self):
         if self.owned:
             await self.snapshot.aclose()
+
+
+class LocalE5Index(EvidenceIndex):
+    """Opt-in multilingual E5 backend using the existing versioned Chroma store."""
+
+    prefer_question_fusion = True
+
+    def __init__(self, directory, store_path, collection):
+        self.directory = Path(directory).resolve(strict=True)
+        files = sorted(p for p in self.directory.iterdir() if p.suffix in {".json", ".safetensors", ".model", ".bin"})
+        signature = [(p.name, p.resolve().name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
+        super().__init__(None, store_path, collection, model_signature=["e5-mean-v1", str(self.directory), signature])
+        self.model = None
+        self.tokenizer = None
+
+    def _encode(self, texts, query):
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+        if self.model is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.tokenizer = AutoTokenizer.from_pretrained(self.directory, local_files_only=True)
+            self.model = AutoModel.from_pretrained(self.directory, local_files_only=True).to(device).eval()
+        prefix = "query: " if query else "passage: "
+        vectors = []
+        tokens = 0
+        with torch.inference_mode():
+            for start in range(0, len(texts), self.batch_size):
+                inputs = self.tokenizer([prefix + t for t in texts[start:start+self.batch_size]],
+                    padding=True, truncation=True, max_length=512, return_tensors="pt").to(self.model.device)
+                mask = inputs.attention_mask.unsqueeze(-1)
+                states = self.model(**inputs).last_hidden_state
+                pooled = (states * mask).sum(dim=1) / mask.sum(dim=1)
+                vectors.extend(torch.nn.functional.normalize(pooled, dim=1).cpu().tolist())
+                tokens += int(inputs.attention_mask.sum())
+        return vectors, tokens
+
+    async def embed(self, texts, *, query=False):
+        vectors, tokens = await asyncio.to_thread(self._encode, texts, query)
+        self.usage["input_tokens"] += tokens
+        return vectors

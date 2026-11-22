@@ -7,7 +7,7 @@ from unittest.mock import patch, AsyncMock
 from src.llm.base import EmbeddingResponse
 from src.research.context import ScopedEvidence
 from src.research.models import EvidenceSpan
-from src.research.retrieval import EvidenceIndex
+from src.research.retrieval import EvidenceIndex, LocalE5Index
 from src.research.workflow import run_research_node
 from test.test_research_workflow import FakeModel, state, item
 
@@ -34,6 +34,18 @@ class EvidenceRetrievalTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.directory.cleanup()
+
+    async def test_local_model_uses_distinct_passage_and_query_modes(self):
+        with patch.dict("os.environ", {"PAPER_AGENT_TEXT_E5_DIR": self.directory.name}):
+            index = EvidenceIndex.from_config()
+        self.assertIsInstance(index, LocalE5Index)
+        index.path = self.directory.name
+        source = span("a", "p1")
+        with patch.object(index, "_encode", return_value=([[1.0, 0.0]], 3)) as encode:
+            await index.prepare([source])
+            self.assertEqual(await index.search("question", ScopedEvidence([source], {"p1"})), [source])
+            self.assertEqual([call.args for call in encode.call_args_list],
+                             [([source.text], False), (["question"], True)])
 
     async def test_persistent_index_reuse_and_single_paper_scope(self):
         a, b = span("a", "p1"), span("b", "p2")

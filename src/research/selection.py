@@ -18,7 +18,7 @@ from .models import (
 
 
 _RRF_OFFSET = 60
-_POLICY = "rrf-relation-greedy-v4"
+_POLICY = "rrf-relation-greedy-v5"
 
 _REQUIREMENT_TERMS = {
     "problem": ("problem", "motivation", "challenge", "问题", "动机", "挑战"),
@@ -179,7 +179,10 @@ def _definition_index(spans):
 async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     query = " ".join([subquery.question, *subquery.retrieval_queries])
     channels = {}
-    dense = await scope.search(query, tasks, 8)
+    direct = subquery.source == "user" and not find_object_labels(subquery.question) and not localization_type(subquery.question)
+    focus_fusion = direct and getattr(scope.retrieval, "prefer_question_fusion", False)
+    dense_limit = 40 if focus_fusion else (32 if direct else 8)
+    dense = await scope.search(subquery.question if direct else query, tasks, dense_limit)
     lexical = _rank_lexical(scope.spans.values(), query, 12)
     section = _rank_sections(scope.spans.values(), subquery, 12)
     exact = _rank_exact_references(scope.spans.values(), query)
@@ -187,6 +190,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     rankings = {"dense": enumerate(dense, 1), "lexical": lexical,
         "section": ((1, span) for span in section),
         "exact_reference": ((1, span) for span in exact), "requirement": requirement}
+    if dense and focus_fusion and not exact:
+        rankings = {"dense": enumerate(dense, 1)}
     scores = defaultdict(float)
     for channel, spans in rankings.items():
         for rank, span in spans:
@@ -195,8 +200,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
 
     # The generated lens query contains generic terms such as "method" and
     # "result". Rank the user's own terminology independently of that expansion.
-    if subquery.source == "user" and not exact and not localization_type(subquery.question):
-        for rank, span in _rank_question_terms(scope.spans.values(), subquery.question, 12):
+    if direct and not exact:
+        for rank, span in _rank_question_terms(scope.spans.values(), subquery.question, dense_limit if dense else 12):
             scores[span.id] += 1 / (_RRF_OFFSET + rank)
             channels.setdefault(span.id, set()).add("bm25")
 
@@ -342,24 +347,54 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visua
         and entry[0].visual_object_ids[0].startswith(f"{entry[0].paper_id}:visual-object:{kind}:")
         and (not visual_anchor or entry[0].id == visual_anchor)] if kind else []
     available_roles = {role for entries in roles.values() for role in entries}
-    anchor_entry = max(anchors or ranked, key=lambda item: (item[1] * 100 +
+    named = {m[1].casefold() for m in _EXPERIMENT.finditer(subquery.question)}
+
+    def relevant_experiment(span):
+        mentions = {m[1].casefold() for m in _EXPERIMENT.finditer(span.section + " " + span.text)}
+        return not named or not mentions or bool(named & mentions)
+
+    eligible = [entry for entry in ranked if max_nodes > 0 and len(entry[0].text) <= char_budget and relevant_experiment(entry[0])]
+    anchors = [entry for entry in anchors if entry in eligible]
+    anchor_entry = max(anchors or eligible, key=lambda item: (item[1] * 100 +
         min(6, max(roles.get(item[0].id, {}).values(), default=0)) +
-        (1.0 if "dense" in item[2] else 0.8 if "exact_reference" in item[2] else 0), item[0].id)) if ranked else None
+        (1.0 if "dense" in item[2] else 0.8 if "exact_reference" in item[2] else 0), item[0].id)) if eligible else None
     selected = [anchor_entry] if anchor_entry else []
     covered = set(matches[anchor_entry[0].id]) if anchor_entry else set()
     total = len(anchor_entry[0].text) if anchor_entry else 0
-    remaining = [item for item in ranked if item != anchor_entry]
+    remaining = [item for item in eligible if item != anchor_entry]
     selected_roles = set(roles.get(anchor_entry[0].id, {})) if anchor_entry else set()
+    # Broad lens requirements may all match in a single introductory passage.
+    # Preserve a chance for a second section with direct evidence for this question.
+    explore_sections = subquery.source == "user" and not references and not kind
+
+    def adds_section(entry):
+        span, _, channels = entry
+        return (explore_sections and span.section and {"dense", "bm25"}.intersection(channels)
+                and all(span.section != prior.section and _text_overlap(span.text, prior.text) < .65
+                        for prior, _, _ in selected))
+
+    direct_ranks = {s.id: rank for rank, s in _rank_question_terms(
+        (entry[0] for entry in eligible), subquery.question, len(eligible))} if explore_sections else {}
+    explicit = set(_matched_requirements_from_question(subquery.question, required))
     while remaining and len(selected) < max_nodes:
         best = None
         best_value = float("-inf")
         for span, fused_score, channels in remaining:
-            if total + len(span.text) > char_budget and selected:
+            if total + len(span.text) > char_budget:
                 continue
             new_requirements = set(matches[span.id]) - covered
             limitation_bonus = 1.5 if {"limitation", "negative_result"} & set(matches[span.id]) else 0
             redundancy = max((_text_overlap(span.text, item[0].text) for item in selected), default=0)
             value = fused_score * 100 + len(new_requirements) * 3 + limitation_bonus - redundancy * 2
+            if explore_sections:
+                rank = direct_ranks.get(span.id)
+                if rank:
+                    value += 6 / math.sqrt(rank)
+                if adds_section((span, fused_score, channels)):
+                    value += 1
+                if explicit:
+                    # Generic lens labels should not outvote an explicitly asked-for condition.
+                    value += 3 * len(new_requirements & explicit) - 2 * len(new_requirements - explicit)
             for role, overlap in roles.get(span.id, {}).items():
                 if role not in selected_roles:
                     value += 8 + min(overlap, 6)
@@ -373,7 +408,8 @@ def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visua
         covered.update(matches[best[0].id])
         selected_roles.update(roles.get(best[0].id, {}))
         if set(required) <= covered and available_roles <= selected_roles:
-            break
+            if not any(adds_section(item) and total + len(item[0].text) <= char_budget for item in remaining):
+                break
 
     anchor = selected[0][0] if selected else None
     trace = []
@@ -449,6 +485,11 @@ def _apply_model_judgments(packets, nodes, increments, anchors):
         version = version_of(payload)
         refined.append(EvidencePacket(id=f"packet:{version}", version=version, **payload))
     return refined
+
+
+def _matched_requirements_from_question(question, required):
+    text = question.casefold()
+    return [kind for kind in required if any(term in text for term in _REQUIREMENT_TERMS.get(kind, ()))]
 
 
 def _matched_requirements(span, required):

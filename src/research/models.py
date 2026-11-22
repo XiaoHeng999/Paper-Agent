@@ -409,7 +409,20 @@ class ReferenceResolution(Record):
     quote: str = Field(min_length=1)
 
 
+class RatioOperands(Record):
+    numerator: str
+    denominator: str
+
+
+class FactCitation(Record):
+    ratio: RatioOperands | None = None
+    clause: str
+    evidence_id: str
+    quote: str = Field(min_length=1)
+
+
 class VerificationDraft(Record):
+    fact_citations: list[FactCitation] = Field(default_factory=list)
     resolved_references: list[ReferenceResolution] = Field(default_factory=list)
     precision_comparison: PrecisionComparison | None = None
     chain_checks: list[ChainCheck] = Field(default_factory=list)

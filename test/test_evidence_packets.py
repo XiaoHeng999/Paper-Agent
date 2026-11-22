@@ -52,6 +52,42 @@ def plan(query):
 
 
 class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_experiment_and_budget_filter(self):
+        def span(key, text, section):
+            return EvidenceSpan(id=key, paper_id="p1", version="1", source_level="full_text",
+                                text=text, section=section)
+        spans = [span("wrong", "Experiment 2 latency result for FP16.", "Results"),
+                 span("result", "Experiment 3 latency result.", "Results"),
+                 span("setup", "Experiment 3 latency uses FP16.", "Setup")]
+        scope = ScopedEvidence(spans, {"p1"})
+        query = plan(subquery(["result"], "What is Experiment 3 latency?"))
+        packet, = await build_evidence_packets(scope, query, None)
+        self.assertEqual(set(packet.evidence_ids), {"setup", "result"})
+        tiny, = await build_evidence_packets(scope, query, None, per_packet_chars=1)
+        self.assertFalse(tiny.evidence_ids)
+
+    async def test_numeric_citation_verdict(self):
+        span = EvidenceSpan(id="s", paper_id="p1", version="1", source_level="full_text",
+            text="Experiment 2 took 15 ms. Experiment 3 took 5 ms.", page_start=2)
+        neighbor = span.model_copy(update={"id":"neighbor"})
+        scope = ScopedEvidence([span, neighbor], {"p1"})
+        text = "Experiment 3 took 5 ms on page 2"
+        for clause, eid, quote, verdict in [
+                (text, "s", "Experiment 3 took 5 ms.", "verified"),
+                (text, "s", "Experiment 2 took 15 ms.", "qualified"),
+                ("It took 5 ms", "s", "5 ms. Experiment 3", "qualified"),
+                (text.replace("page 2","page 3"), "s", "Experiment 3 took 5 ms.", "qualified"),
+                (text, "neighbor", "Experiment 3 took 5 ms.", "insufficient_evidence"),
+                (text, "s", "Experiment 3 took 7 ms.", "insufficient_evidence")]:
+            with self.subTest(clause=clause, eid=eid, quote=quote):
+                claim = Claim(id="c", version="1", paper_id="p1", evidence_ids=["s"], statement=clause)
+                draft = VerificationDraft(verdict="verified", reason="reported", evidence_ids=["s"],
+                    fidelity={"status":"supported", "evidence_ids":["s"]},
+                    fact_citations=[{"clause":clause, "quote":quote, "evidence_id":eid}])
+                tasks = SimpleNamespace(options=SimpleNamespace(context_chars=4000), ask=AsyncMock(return_value=draft))
+                with patch("src.research.visual.verification_images", return_value=([], [], [])):
+                    self.assertEqual((await verify(tasks, claim, scope)).verdict, verdict)
+
     async def test_hybrid_seed_expands_relations_and_covers_complementary_requirements(self):
         result = EvidenceSpan(id="result", paper_id="p1", version="1", source_level="full_text",
             text="The latency result improves performance over the baseline.", section="4 Results",
@@ -116,6 +152,7 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
                 ({"seed":"fabrication"}, "insufficient_evidence")]:
             tasks.ask.return_value = VerificationDraft(verdict="verified", reason="reported",
                 evidence_ids=["seed"], fidelity={"status":"supported","evidence_ids":["seed"]},
+                fact_citations=[{"clause":claim.statement,"evidence_id":"setup","quote":setup.text}],
                 chain_checks=[{"evidence_ids":["seed","bridge","setup"], "status":"consistent",
                     "reason":"aligned", "quotes":quotes}])
             with patch("src.research.visual.verification_images", return_value=([], [], [])):
