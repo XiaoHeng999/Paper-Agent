@@ -14,6 +14,8 @@
 
 相关现状审计见 [PDF 阅读链路中的 Topic、Query、解析、切分与检索问题分析](./pdf-query-chunking-retrieval-analysis.md)。
 
+图像向量的三种部署方式、临时内存方案和启用条件见 [Paper-Agent 图像 Embedding 策略](./image-embedding-strategy.md)。
+
 ---
 
 ## 当前实现状态（2026-11-22）
