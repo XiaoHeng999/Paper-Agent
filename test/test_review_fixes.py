@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import io
 import copy
 import json
 import tempfile
@@ -7,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject, ArrayObject
 from src.research.agents import ModelTasks, read_claims, verify, write_report
@@ -16,6 +20,7 @@ from src.research.context import ScopedEvidence
 from src.research.evaluation import load_dataset, score, case_version, dataset_audit, run_workflow_cases
 from src.research.incremental import IncrementalPlan
 from src.research.models import Claim, EvidenceSpan, ResearchOptions, PaperCard, AnalysisRelation, VerificationResult
+from src.research.multimodal import build_multimodal_catalog
 from src.research.provenance import source_manifest, document_version
 from src.research.scheduling import comparison_schedule
 from src.research.visual import prepare_visual, inspect_pdf, verification_images
@@ -104,6 +109,59 @@ class SourceRevisionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_query_transcribes_only_matching_raster_and_verifies_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mixed.pdf"
+            scanned_pdf(path)
+            add_header(path, "Native text")
+            writer = PdfWriter(clone_from=str(path))
+            page = writer.pages[0]
+            name = next(iter(page["/Resources"]["/XObject"]))
+            stream = DecodedStreamObject()
+            stream.set_data(f"""q 160 0 0 100 40 470 cm {name} Do Q
+                BT /HeaderFont 12 Tf 40 450 Td (Figure 1: First experiment latency) Tj ET
+                q 200 0 0 80 40 240 cm {name} Do Q
+                BT /HeaderFont 12 Tf 40 220 Td (Figure 2: Second experiment latency) Tj ET""".encode())
+            page[NameObject("/Contents")] = writer._add_object(stream)
+            with path.open("wb") as out:
+                writer.write(out)
+            paper = item()
+            paper["full_text"]["source_path"] = str(path)
+            model = VisualModel()
+            tasks = ModelTasks(model, ResearchOptions())
+            tasks.question = "Read the values in Fig. 2"
+            evidence, audit = await prepare_visual(tasks, paper, [])
+            self.assertEqual(audit["warnings"], [])
+            self.assertEqual(len(model.images), 1)
+            crop = base64.b64decode(model.images[0][0]["image_url"]["url"].split(",")[1])
+            self.assertEqual(Image.open(io.BytesIO(crop)).size, (400, 160))
+            updated, objects = build_multimodal_catalog(evidence, tasks.visual_catalog["p1"], tasks.visual_pages)
+            self.assertEqual([obj.label for obj in objects], ["figure:1", "figure:2"])
+            obj = objects[1]
+            self.assertEqual(obj.bbox, [40, 240, 240, 320])
+            self.assertEqual(obj.crop_version, hashlib.sha256(crop).hexdigest())
+            self.assertEqual(updated[0].visual_object_ids, [obj.id])
+            target = claim("p1").model_copy(update={"evidence_ids": [updated[0].id]})
+            images, context, missing = verification_images(tasks, updated, target)
+            self.assertEqual(missing, [])
+            self.assertEqual(images, [tasks.visual_pages["p1", 1]["url"]])
+            self.assertEqual(obj.source_version, context[0]["source_version"])
+            tasks.previous_visual_evidence = [span.model_dump() for span in updated]
+            again, audit = await prepare_visual(tasks, paper, [])
+            self.assertEqual(again[0].id, updated[0].id)
+            self.assertTrue(audit["pages"][0]["crop_transcriptions"][0]["reused"])
+            tasks.question = "Summarize this paper"
+            unrequested, _ = await prepare_visual(tasks, paper, [])
+            self.assertFalse(unrequested)
+            self.assertEqual(len(model.images), 1)
+
+            # A two-panel figure with only one caption has no reliable single-raster boundary.
+            stream.set_data(stream.get_data().replace(b"Figure 1:", b"Results:"))
+            with path.open("wb") as out:
+                writer.write(out)
+            _, _, catalog = inspect_pdf(path, 1)
+            self.assertEqual(catalog[0]["object_bboxes"], {})
+
     async def test_mixed_scan_with_long_header_is_transcribed(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'mixed.pdf';scanned_pdf(path)

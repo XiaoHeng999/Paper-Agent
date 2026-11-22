@@ -7,12 +7,14 @@ import asyncio
 import base64
 import hashlib
 import io
+import math
 import re
 import threading
 from contextlib import closing
 from pathlib import Path
 
 from pydantic import Field
+from .multimodal import find_object_labels
 from .models import EvidenceSpan, Record, version_of
 
 _LOCK = threading.RLock()
@@ -26,8 +28,53 @@ class Transcription(Record):
 
 
 def labels(text):
-    matches = re.findall(r"(?i)\b(fig(?:ure)?\.?|table)\s*(\d+)|([图表])\s*(\d+)", text)
-    return {("table" if (a.lower() == "table" or c == "表") else "figure") + ":" + (b or d) for a, b, c, d in matches}
+    return {label for label, _ in find_object_labels(text)}
+
+
+def _raster_layout(page, textpage, text, images):
+    """Bind captions to nearby raster objects only for an unambiguous one-to-one layout."""
+    if not images or len(images) > 12 or page.get_rotation():
+        return {}
+    pattern = r"^\s*((?:fig(?:ure)?\.?|table|图|表)\s*[A-Z]?\d+(?:[.-]\d+)?[a-z]?)\s*[:.|：—-]\s*\S"
+    captions = [line.strip() for line in text.splitlines() if re.match(pattern, line, re.I)]
+    if len(captions) != len(images):
+        return {}
+    x0, y0, x1, y1 = page.get_bbox()
+    layout = {}
+    for caption in captions:
+        label = next(iter(labels(re.match(pattern, caption, re.I)[1])))
+        with closing(textpage.search(caption)) as search:
+            match = search.get_next()
+            if not match or search.get_next():
+                return {}
+            x, y, _, upper = textpage.get_charbox(match[0])
+        candidates = []
+        for left, bottom, right, top in images:
+            if not (x0 <= left < right <= x1 and y0 <= bottom < top <= y1
+                    and right-left >= 48 and top-bottom >= 24):
+                continue
+            gap = bottom-upper if label.startswith("figure:") or upper <= bottom else y-top
+            if left-12 <= x <= right and -1 <= gap <= 32:
+                candidates.append([left, bottom, right, top])
+        if len(candidates) != 1 or candidates[0] in layout.values() or label in layout:
+            return {}
+        layout[label] = candidates[0]
+    return layout
+
+
+def _crop_png(page, bbox):
+    """Map unrotated PDF canvas coordinates to the selected page bitmap."""
+    from PIL import Image
+    x0, y0, x1, y1 = page["page_bbox"]
+    left, bottom, right, top = bbox
+    data = base64.b64decode(page["url"].split(",", 1)[1])
+    with Image.open(io.BytesIO(data)) as image:
+        sx, sy = image.width / (x1-x0), image.height / (y1-y0)
+        box = (math.floor((left-x0)*sx), math.floor((y1-top)*sy),
+               math.ceil((right-x0)*sx), math.ceil((y1-bottom)*sy))
+        output = io.BytesIO()
+        image.crop(box).save(output, format="PNG")
+        return output.getvalue()
 
 
 def inspect_pdf(path, limit, query=""):
@@ -36,29 +83,43 @@ def inspect_pdf(path, limit, query=""):
     path = Path(path)
     if path.stat().st_size > 50 * 1024 * 1024:
         raise ValueError("视觉 PDF 超过 50 MB 限制")
-    source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    source = path.read_bytes()
+    source_hash = hashlib.sha256(source).hexdigest()
     candidates, selected = [], []
     wanted = labels(query)
-    with _LOCK, pdfium.PdfDocument(path) as document:
+    with _LOCK, pdfium.PdfDocument(source) as document:
         for index in range(min(len(document), 500)):
             with closing(document[index]) as page:
-                with closing(page.get_textpage()) as textpage:
-                    text = textpage.get_text_range()
+                direct_images = []
+                nested_images = False
                 width, height = page.get_size()
                 image_area = 0
                 for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE]):
                     left, bottom, right, top = obj.get_bounds()
+                    if obj.level:
+                        nested_images = True
+                    else:
+                        direct_images.append((left, bottom, right, top))
                     image_area += max(0, right-left) * max(0, top-bottom)
+                with closing(page.get_textpage()) as textpage:
+                    text = textpage.get_text_range()
+                    layout = {}
+                    if not nested_images and image_area < width * height * .6 and len(text.strip()) >= 40:
+                        try:
+                            layout = _raster_layout(page, textpage, text, direct_images)
+                        except pdfium.PdfiumError:
+                            layout = {}
                 # Full-page raster plus a searchable header is still a scan.
                 scanned = len(text.strip()) < 40 or image_area >= width * height * .6
-                captions = set()
+                captions = set(layout)
                 for line in text.splitlines():
                     if re.match(r"(?i)^\s*(fig(?:ure)?\.?|table|图|表)\s*\d+", line):
                         captions.update(labels(line))
                 if not scanned and not image_area and not VISUAL.search(text):
                     continue
                 candidates.append({"page": index+1, "scanned": scanned, "captions": sorted(captions), "visual_content": bool(scanned or image_area or captions),
-                    "source_version": source_hash,
+                    "source_version": source_hash, "page_bbox": list(page.get_bbox()),
+                    "object_bboxes": layout,
                     "priority": (int(bool(captions & wanted)), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
         ordered = sorted(candidates, key=lambda p: (tuple(-x for x in p['priority']), p['page']))
         for metadata in ordered[:limit]:
@@ -109,17 +170,34 @@ async def prepare_visual(tasks, item, evidence):
                 version = version_of([span.version, hashes])
                 span = span.model_copy(update={"id": span.id + ":visual@" + version, "version": version})
             updated.append(span)
-        evidence = updated
+        remapped = {old.id: new.id for old, new in zip(evidence, updated)}
+        evidence = [span.model_copy(update={
+            "previous_id": remapped.get(span.previous_id, span.previous_id),
+            "next_id": remapped.get(span.next_id, span.next_id),
+        }) for span in updated]
         additions = []
+        crop_budget = 2
+        wanted = labels(getattr(tasks, "question", ""))
         for page in pages:
             metadata = {k: v for k, v in page.items() if k != "url"}
             audit["pages"].append(metadata)
             tasks.visual_pages[(paper_id, page["page"])] = page
             if not page["scanned"]:
+                for label in sorted(wanted.intersection(page.get("object_bboxes", {}))):
+                    if not crop_budget:
+                        break
+                    crop_budget -= 1
+                    try:
+                        spans, reused = await _transcribe_crop(tasks, paper_id, page, label)
+                        additions.extend(spans)
+                        metadata.setdefault("crop_transcriptions", []).append({
+                            "label": label, "crop_version": spans[0].crop_version, "reused": reused})
+                    except Exception as exc:
+                        audit["warnings"].append(f"{paper_id} 第 {page['page']} 页 {label} 裁剪转录未完成：{exc}")
                 continue
             previous = [EvidenceSpan.model_validate(e) for e in getattr(tasks, "previous_visual_evidence", [])
                 if e.get("paper_id") == paper_id and e.get("modality") == "visual_transcription"
-                and e.get("image_version") == page["image_version"] and e.get("page_start") == page["page"]]
+                and not e.get("crop_version") and e.get("image_version") == page["image_version"] and e.get("page_start") == page["page"]]
             if previous:
                 additions.extend(previous)
                 metadata["transcription_reused"] = True
@@ -150,6 +228,37 @@ async def prepare_visual(tasks, item, evidence):
     return evidence, audit
 
 
+async def _transcribe_crop(tasks, paper_id, page, label):
+    bbox = page["object_bboxes"][label]
+    data = await asyncio.to_thread(_crop_png, page, bbox)
+    crop_version = hashlib.sha256(data).hexdigest()
+    object_id = f"{paper_id}:visual-object:{label}"
+    previous = []
+    for value in getattr(tasks, "previous_visual_evidence", []):
+        if (value.get("crop_version") == crop_version and value.get("image_version") == page["image_version"]
+                and value.get("crop_source_version") == page["source_version"]
+                and value.get("page_start") == page["page"] and value.get("visual_object_ids") == [object_id]):
+            previous.append(EvidenceSpan.model_validate(value))
+    if previous:
+        return previous, True
+    result = await tasks.ask("visual_transcription", "逐字转录此图表裁剪中的图例、坐标轴、数值、单位和表格行列。"
+        "不可辨内容记入 uncertainties，无法读取时 readable=false。", {
+            "paper_id": paper_id, "page": page["page"], "object_label": label, "bbox": bbox,
+            "crop_version": crop_version}, Transcription,
+        images=["data:image/png;base64," + base64.b64encode(data).decode()])
+    if not result.readable or not result.text.strip():
+        raise ValueError("裁剪内没有可靠文字")
+    version = version_of([page["source_version"], page["page"], bbox, crop_version, result.model_dump()])
+    spans = []
+    for offset in range(0, len(result.text), 4000):
+        spans.append(EvidenceSpan(id=f"{object_id}:ocr:{offset}@{version}", paper_id=paper_id, version=version,
+            text=result.text[offset:offset+4000], source_level="full_text", page_start=page["page"], page_end=page["page"],
+            section=f"{label} 图表转录", modality="visual_transcription", view_type="ocr",
+            visual_object_ids=[object_id], crop_version=crop_version, crop_source_version=page["source_version"],
+            image_version=page["image_version"], transcription_uncertainties=result.uncertainties))
+    return spans, False
+
+
 def verification_images(tasks, raw, target):
     images, context, missing, requested = [], [], [], []
     target_text = getattr(target, "statement", getattr(target, "rationale", ""))
@@ -157,6 +266,9 @@ def verification_images(tasks, raw, target):
     core = [s for s in raw if s.id in core_ids]
     for span in core:
         catalog = tasks.visual_catalog.get(span.paper_id, [])
+        if span.crop_version:
+            requested.append((span, span.page_start))
+            continue
         references = labels(span.text + " " + target_text)
         resolved = {p['page'] for p in catalog if references.intersection(p['captions'])}
         local = range(span.page_start, (span.page_end or span.page_start) + 1) if span.page_start else []
@@ -167,12 +279,15 @@ def verification_images(tasks, raw, target):
     seen = set()
     for span, number in requested:
         key = (span.paper_id, number)
+        page = tasks.visual_pages.get(key)
+        if not page or (span.crop_source_version and span.crop_source_version != page.get("source_version")) or (span.image_version and number == span.page_start and page['image_version'] != span.image_version):
+            missing.append(f"{span.paper_id} 第 {number or '未知'} 页未提供匹配原图")
+            continue
         if key in seen:
             continue
         seen.add(key)
-        page = tasks.visual_pages.get(key)
-        if not page or len(images) >= 4 or (span.image_version and number == span.page_start and page['image_version'] != span.image_version):
-            missing.append(f"{span.paper_id} 第 {number or '未知'} 页未提供匹配原图")
+        if len(images) >= 4:
+            missing.append(f"{span.paper_id} 第 {number} 页超出本次原图预算")
             continue
         images.append(page['url'])
         context.append({"paper_id": span.paper_id, "page": number, "image_version": page['image_version'], "source_version": page['source_version']})

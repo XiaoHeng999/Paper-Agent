@@ -7,7 +7,7 @@ from .models import EvidenceSpan, VisualObject, version_of
 
 
 _REFERENCE = re.compile(
-    r"(?i)(?:(fig(?:ure)?\.?)|(table)|(eq(?:uation)?\.?)|([图表式]))\s*([A-Z]?\d+(?:[.\-]\d+)?[a-z]?)"
+    r"(?i)(?<![a-z0-9_])(?:(fig(?:ure)?\.?)|(table)|(eq(?:uation)?\.?)|([图表式]))\s*([A-Z]?\d+(?:[.\-]\d+)?[a-z]?)"
 )
 _CAPTION = re.compile(
     r"(?i)^\s*(?:(fig(?:ure)?\.?)|(table)|(eq(?:uation)?\.?)|([图表式]))\s*"
@@ -29,6 +29,8 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
     records = {}
     caption_labels_by_evidence = {}
     for span in evidence:
+        if span.crop_version:
+            continue
         caption_labels = set()
         for line in span.text.splitlines():
             match = _CAPTION.match(line)
@@ -62,12 +64,15 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         if record["page"]:
             labels_by_page.setdefault(record["page"], set()).add(label)
 
+    pages_by_number = {page["page"]: page for page in catalog or []}
     updated = []
     for span in evidence:
         referenced = {label for label, _ in find_object_labels(span.text)}
         caption_labels = caption_labels_by_evidence.get(span.id, set())
         linked = referenced | caption_labels
-        if span.modality == "visual_transcription" and span.page_start:
+        if span.crop_version:
+            linked = {label for label, oid in object_ids.items() if oid in span.visual_object_ids}
+        elif span.modality == "visual_transcription" and span.page_start:
             page_labels = labels_by_page.get(span.page_start, set())
             if not linked and len(page_labels) == 1:
                 linked |= page_labels
@@ -89,8 +94,11 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         discussion_ids = [span.id for span in views if span.view_type == "nearby_discussion"]
         prepared_page = visual_pages.get((paper_id, record["page"])) if record["page"] else None
         image_version = str((prepared_page or {}).get("image_version") or "")
-        payload = {"paper_id": paper_id, "object_type": record["object_type"], "label": label,
-            "page": record["page"], "caption": record["caption"], "bbox": None,
+        page_meta = pages_by_number.get(record["page"], {})
+        payload = {"source_version": page_meta.get("source_version", ""),
+            "crop_version": next((span.crop_version for span in views if span.crop_version), ""),
+            "paper_id": paper_id, "object_type": record["object_type"], "label": label,
+            "page": record["page"], "caption": record["caption"], "bbox": page_meta.get("object_bboxes", {}).get(label),
             "image_version": image_version, "caption_evidence_ids": caption_ids,
             "ocr_evidence_ids": ocr_ids, "discussion_evidence_ids": discussion_ids,
             "view_evidence_ids": [span.id for span in views]}

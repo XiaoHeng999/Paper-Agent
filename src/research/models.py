@@ -252,6 +252,8 @@ class EvidenceSpan(Record):
     section: str = ""
     modality: Literal["text", "visual_transcription"] = "text"
     image_version: str = ""
+    crop_version: str = ""
+    crop_source_version: str = ""
     transcription_uncertainties: list[str] = Field(default_factory=list)
     previous_id: str = ""
     next_id: str = ""
@@ -388,6 +390,8 @@ class VerificationResult(VerificationDraft):
 
 
 class VisualObject(Record):
+    source_version: str = ""
+    crop_version: str = ""
     id: str
     paper_id: str
     object_type: Literal["figure", "table", "equation"]

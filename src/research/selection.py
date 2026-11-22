@@ -203,11 +203,13 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
         if bridge_id not in paths:
             continue
         bridge = scope.spans[bridge_id]
+        if bridge.crop_version:
+            continue
         labels = set(find_object_labels(bridge.text))
         if not labels:
             continue
         for span in scope.spans.values():
-            if span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
+            if span.crop_version or span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
                 continue
             if span.id == paths[bridge_id][0].source_id or not _matched_requirements(span, gaps):
                 continue
@@ -359,10 +361,18 @@ def _rank_sections(spans, subquery, limit):
 
 
 def _rank_exact_references(spans, query):
-    references = set(find_object_labels(query))
+    references = {label for label, _ in find_object_labels(query)}
     if not references:
         return []
-    return [span for span in spans if references.intersection(find_object_labels(span.text))]
+    matches = []
+    for span in spans:
+        if span.crop_version:
+            labels = {oid.removeprefix(f"{span.paper_id}:visual-object:") for oid in span.visual_object_ids}
+        else:
+            labels = {label for label, _ in find_object_labels(span.text)}
+        if references & labels:
+            matches.append(span)
+    return matches
 
 
 def _rank_requirements(spans, subquery, limit):
