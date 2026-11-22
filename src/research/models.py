@@ -241,7 +241,16 @@ class ComparisonAxis(Record):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class TableCell(Record):
+    row: int = Field(ge=1)
+    column: int = Field(ge=1)
+    row_header: str
+    column_header: str
+    value: str
+
+
 class EvidenceSpan(Record):
+    table_cell: TableCell | None = None
     id: str
     paper_id: str
     version: str
@@ -260,7 +269,7 @@ class EvidenceSpan(Record):
     parent_id: str = ""
     overlap_characters: int = Field(default=0, ge=0)
     visual_object_ids: list[str] = Field(default_factory=list)
-    view_type: Literal["text", "caption", "ocr", "nearby_discussion"] = "text"
+    view_type: Literal["text", "caption", "ocr", "table_cell", "nearby_discussion"] = "text"
 
 
 class PreparedPaper(Record):
@@ -414,6 +423,7 @@ class VisualObject(Record):
     bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
     image_version: str = ""
     caption_evidence_ids: list[str] = Field(default_factory=list)
+    cell_evidence_ids: list[str] = Field(default_factory=list)
     ocr_evidence_ids: list[str] = Field(default_factory=list)
     discussion_evidence_ids: list[str] = Field(default_factory=list)
     view_evidence_ids: list[str] = Field(default_factory=list)

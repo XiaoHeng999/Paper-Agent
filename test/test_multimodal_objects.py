@@ -48,6 +48,33 @@ class MultimodalObjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated[-1].visual_object_ids, [])
         self.assertTrue(all(not obj.ocr_evidence_ids for obj in objects))
 
+    async def test_rectangular_table_preserves_headers_units_and_parent_evidence(self):
+        text = ("Table 2: Controlled comparison\n"
+                "| Method | Precision | Latency (ms) |\n|---|---|---|\n"
+                "| Ours | FP16 | 10* |\n| Baseline | FP32 | 14 |\n* At batch size 1.")
+        table = EvidenceSpan(id="t", paper_id="p1", version="v", text=text, source_level="full_text",
+            page_start=4, page_end=4)
+        spans, objects = build_multimodal_catalog([table])
+        cells = [span for span in spans if span.table_cell]
+        self.assertEqual(len(cells), 4)
+        self.assertEqual(cells[1].table_cell.model_dump(), {"row": 1, "column": 3,
+            "row_header": "Ours", "column_header": "Latency (ms)", "value": "10*"})
+        self.assertEqual(cells[1].parent_id, "t")
+        self.assertEqual(objects[0].cell_evidence_ids, [s.id for s in cells])
+        self.assertEqual(build_multimodal_catalog(spans), (spans, objects))
+        query = ReadingSubquery(id="rq", source="user", lens="experimental_design",
+            question="What precision is the baseline?", retrieval_queries=["baseline precision"],
+            evidence_requirements=[EvidenceRequirement(kind="baseline_precision")])
+        plan = ReadingPlan(paper_id="p1", mode="targeted", user_prompt=query.question, subqueries=[query])
+        packet = (await build_evidence_packets(ScopedEvidence(spans, {"p1"}), plan, None))[0]
+        self.assertIn(cells[2].id, packet.evidence_ids)
+        self.assertFalse(packet.missing_requirements)
+
+        ragged = table.model_copy(update={"text": text.replace("| FP32 | 14 |", "| 14 |")})
+        spans, objects = build_multimodal_catalog([ragged])
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(objects[0].cell_evidence_ids, [])
+
     async def test_packet_expands_from_text_reference_to_other_object_views(self):
         updated, _ = build_multimodal_catalog(self.evidence(),
             [{"page": 3, "captions": ["figure:2"]}])

@@ -251,7 +251,7 @@ async def prepare_visual(tasks, item, evidence, reading_plan=None):
                 continue
             previous = [EvidenceSpan.model_validate(e) for e in getattr(tasks, "previous_visual_evidence", [])
                 if e.get("paper_id") == paper_id and e.get("modality") == "visual_transcription"
-                and not e.get("crop_version") and e.get("image_version") == page["image_version"] and e.get("page_start") == page["page"]]
+                and not e.get("table_cell") and not e.get("crop_version") and e.get("image_version") == page["image_version"] and e.get("page_start") == page["page"]]
             if previous:
                 additions.extend(previous)
                 metadata["transcription_reused"] = True
@@ -289,14 +289,14 @@ async def _transcribe_crop(tasks, paper_id, page, label):
     object_id = f"{paper_id}:visual-object:{label}"
     previous = []
     for value in getattr(tasks, "previous_visual_evidence", []):
-        if (value.get("crop_version") == crop_version and value.get("image_version") == page["image_version"]
+        if (not value.get("table_cell") and value.get("crop_version") == crop_version and value.get("image_version") == page["image_version"]
                 and value.get("crop_source_version") == page["source_version"]
                 and value.get("page_start") == page["page"] and value.get("visual_object_ids") == [object_id]):
             previous.append(EvidenceSpan.model_validate(value))
     if previous:
         return previous, True
     result = await tasks.ask("visual_transcription", "逐字转录此图表裁剪中的图例、坐标轴、数值、单位和表格行列。"
-        "不可辨内容记入 uncertainties，无法读取时 readable=false。", {
+        "表格行列清楚时输出带表头和分隔行的 Markdown 管道表格，行头放在第一列，保留单位与原始脚注标记。不可辨内容记入 uncertainties，无法读取时 readable=false。", {
             "paper_id": paper_id, "page": page["page"], "object_label": label, "bbox": bbox,
             "crop_version": crop_version}, Transcription,
         images=["data:image/png;base64," + base64.b64encode(data).decode()])

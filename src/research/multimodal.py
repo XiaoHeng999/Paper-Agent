@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .models import EvidenceSpan, VisualObject, version_of
+from .models import EvidenceSpan, TableCell, VisualObject, version_of
 
 
 _REFERENCE = re.compile(
@@ -19,10 +19,39 @@ _DISCUSSION_OPENING = re.compile(
 )
 
 
+def _table_cells(span):
+    """Index a single rectangular pipe table with explicit row and column headers."""
+    lines = span.text.splitlines()
+    rows = [(index, [part.strip() for part in line.strip()[1:-1].split("|")])
+            for index, line in enumerate(lines) if line.strip().startswith("|") and line.strip().endswith("|")]
+    if len(rows) < 3 or rows[-1][0] - rows[0][0] + 1 != len(rows):
+        return []
+    headers, separator = rows[0][1], rows[1][1]
+    if (len(headers) < 2 or not all(headers[1:]) or len(set(headers[1:])) != len(headers)-1
+            or any(len(row) != len(headers) for _, row in rows)
+            or not all(re.fullmatch(r":?-{3,}:?", value) for value in separator)
+            or any(not row[0] or all(re.fullmatch(r":?-{3,}:?", value) for value in row)
+                   for _, row in rows[2:]) or (len(rows)-2)*(len(headers)-1) > 128):
+        return []
+    result = []
+    for r, (_, row) in enumerate(rows[2:], 1):
+        for c, value in enumerate(row[1:], 2):
+            if not value:
+                continue
+            cell = TableCell(row=r, column=c, row_header=row[0], column_header=headers[c-1], value=value)
+            version = version_of([span.version, cell.model_dump()])
+            result.append(span.model_copy(update={"id": f"{span.id}:cell:{r}:{c}@{version}",
+                "version": version, "parent_id": span.id, "previous_id": "", "next_id": "",
+                "overlap_characters": 0, "table_cell": cell, "view_type": "table_cell",
+                "text": f"{cell.row_header} | {cell.column_header} | {cell.value}"}))
+    return result
+
+
 def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] | None = None,
         visual_pages: dict | None = None) -> tuple[list[EvidenceSpan], list[VisualObject]]:
     """Bind caption, OCR and discussion spans to stable paper-scoped visual objects."""
 
+    evidence = [span for span in evidence if span.table_cell is None]
     if not evidence:
         return evidence, []
     paper_id = evidence[0].paper_id
@@ -79,10 +108,14 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
         view_type = "ocr" if span.modality == "visual_transcription" else (
             "caption" if caption_labels else
             "nearby_discussion" if linked else span.view_type)
-        updated.append(span.model_copy(update={
+        bound = span.model_copy(update={
             "visual_object_ids": [object_ids[label] for label in sorted(linked) if label in object_ids],
             "view_type": view_type,
-        }))
+        })
+        updated.append(bound)
+        if (bound.source_level == "full_text" and len(linked) == 1 and len(bound.visual_object_ids) == 1
+                and next(iter(linked)).startswith("table:") and (bound.crop_version or caption_labels)):
+            updated.extend(_table_cells(bound))
 
     visual_pages = visual_pages or {}
     objects = []
@@ -100,6 +133,7 @@ def build_multimodal_catalog(evidence: list[EvidenceSpan], catalog: list[dict] |
             "paper_id": paper_id, "object_type": record["object_type"], "label": label,
             "page": record["page"], "caption": record["caption"], "bbox": page_meta.get("object_bboxes", {}).get(label),
             "image_version": image_version, "caption_evidence_ids": caption_ids,
+            "cell_evidence_ids": [s.id for s in views if s.table_cell],
             "ocr_evidence_ids": ocr_ids, "discussion_evidence_ids": discussion_ids,
             "view_evidence_ids": [span.id for span in views]}
         version = version_of({**payload, "views": [(span.id, span.version) for span in views]})

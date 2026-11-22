@@ -340,9 +340,13 @@ def _apply_model_judgments(packets, nodes, increments, anchors):
 def _matched_requirements(span, required):
     text = f"{span.section} {span.text}".casefold()
     matched = [kind for kind in required if any(term in text for term in _REQUIREMENT_TERMS.get(kind, ()))]
-    if "baseline_precision" in required and re.search(
+    cell = span.table_cell
+    precision_row = cell and re.fullmatch(r"baseline|基线", cell.row_header, re.I) and re.fullmatch(
+        r"precision|dtype|数值精度|精度", cell.column_header, re.I) and re.fullmatch(
+        r"(?:fp(?:8|16|32|64)|bf16|int[48])", cell.value, re.I)
+    if "baseline_precision" in required and (precision_row or re.search(
             r"(?:\bbaseline(?: precision)?|基线(?:精度)?)\s*(?:uses?|used|runs? (?:in|at)|was|is|采用|使用|为)?"
-            r"\s*[:：|=]?\s*(?:fp(?:8|16|32|64)|bf16|int[48])(?![a-z0-9])", span.text, re.I):
+            r"\s*[:：|=]?\s*(?:fp(?:8|16|32|64)|bf16|int[48])(?![a-z0-9])", span.text, re.I)):
         matched.append("baseline_precision")
     return matched
 
