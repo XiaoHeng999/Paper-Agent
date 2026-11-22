@@ -85,6 +85,7 @@ model.json
 
 # other
 doc/*
+/docs/
 paper-search-mcp/
 data/*
 .claude/*

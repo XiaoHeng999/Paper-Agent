@@ -1,7 +1,7 @@
 [project]
 name = "papers-agents"
 version = "0.1.0"
-description = "Add your description here"
+description = "Evidence-grounded paper reading, analysis, and optional cross-paper review"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
