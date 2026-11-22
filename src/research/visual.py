@@ -9,12 +9,14 @@ import hashlib
 import io
 import re
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 
 from pydantic import Field
+from .label_ocr import label_views
 from .context import ScopedEvidence
-from .planning import build_reading_plan
+from .planning import VISUAL_LABEL_QUERY, build_reading_plan
 from .selection import build_evidence_packets
 from .multimodal import find_object_labels
 from .models import EvidenceSpan, Record, version_of
@@ -33,12 +35,101 @@ def labels(text):
     return {label for label, _ in find_object_labels(text)}
 
 
-def _object_layout(page, textpage, text, images, reading_order):
+def _framed_vector_boxes(page, textpage):
+    """Accept isolated rectangular vector frames enclosing several drawn elements."""
+    import ctypes
+    from itertools import islice
+    from pypdfium2 import raw
+    objects = list(islice(page.get_objects(filter=[raw.FPDF_PAGEOBJ_PATH], max_depth=1), 257))
+    if len(objects) > 256:
+        return []
+    boxes = [obj.get_bounds() for obj in objects]
+    x0, y0, x1, y1 = page.get_bbox()
+    frames = []
+    for idx, (obj, box) in enumerate(zip(objects, boxes)):
+        l, b, r, t = box
+        if r-l < 48 or t-b < 24 or (r-l)*(t-b) > .6*(x1-x0)*(y1-y0):
+            continue
+        count = raw.FPDFPath_CountSegments(obj)
+        if count not in (4, 5):
+            continue
+        fill, stroke = ctypes.c_int(), ctypes.c_int()
+        if not raw.FPDFPath_GetDrawMode(obj, fill, stroke) or not stroke.value:
+            continue
+        points = []
+        for n in range(count):
+            segment = raw.FPDFPath_GetPathSegment(obj, n)
+            x, y = ctypes.c_float(), ctypes.c_float()
+            if (not segment or raw.FPDFPathSegment_GetType(segment) !=
+                    (raw.FPDF_SEGMENT_LINETO if n else raw.FPDF_SEGMENT_MOVETO)
+                    or not raw.FPDFPathSegment_GetPoint(segment, x, y)):
+                break
+            points.append((x.value, y.value))
+        if (len(points) != count or len(set(points)) != 4 or len({p[0] for p in points}) != 2
+                or len({p[1] for p in points}) != 2 or not raw.FPDFPathSegment_GetClose(segment)
+                or any(x != u and y != v for (x,y),(u,v) in zip(points, points[1:]+points[:1]))):
+            continue
+        overlaps = [other for j, other in enumerate(boxes) if j != idx
+            and other[0] < r and other[2] > l and other[1] < t and other[3] > b]
+        if len(overlaps) < 2 or any(a < l or c > r or d > t or e < b for a,e,c,d in overlaps):
+            continue
+        # Tick labels immediately outside a plotting frame mean the frame alone
+        # would clip evidence. Leave that page to whole-page verification.
+        margins = [(l-12,b,l,t), (r,b,r+12,t), (l,t,r,t+12), (l,b-12,r,b)]
+        if any(textpage.get_text_bounded(*region).strip() for region in margins):
+            continue
+        frames.append(box)
+    return frames
+
+
+def _labelled_panels(textpage, caption, images):
+    """Join a connected panel grid when caption letters uniquely identify every box."""
+    letters = re.findall(r"\(([a-z])\)", caption)
+    if letters != [chr(ord("a")+i) for i in range(len(images))]:
+        return {}
+    panels = {}
+    used = set()
+    for letter in letters:
+        matches = []
+        with closing(textpage.search(f"({letter})", match_case=True)) as search:
+            while (found := search.get_next()):
+                x, y, _, _ = textpage.get_charbox(found[0])
+                matches.extend(i for i, (l,b,r,t) in enumerate(images) if l <= x < r and b <= y < t)
+        if len(matches) != 1 or matches[0] in used:
+            return {}
+        used.add(matches[0])
+        panels[letter] = list(images[matches[0]])
+
+    connected = {0}
+    for _ in images:
+        before = len(connected)
+        for i, (left, bottom, right, top) in enumerate(images):
+            if i in connected:
+                continue
+            for j in tuple(connected):
+                l, b, r, t = images[j]
+                xgap, ygap = max(left-r, l-right), max(bottom-t, b-top)
+                if ((0 <= xgap <= 40 and abs(bottom-b) <= 16 and abs(top-t) <= 16)
+                        or (0 <= ygap <= 40 and abs(left-l) <= 16 and abs(right-r) <= 16)):
+                    connected.add(i)
+                    break
+        if len(connected) == before:
+            break
+    return panels if len(connected) == len(images) else {}
+
+
+def _object_layout(page, textpage, text, images, reading_order, panel_layout):
     """Bind captions to nearby raster objects only for an unambiguous one-to-one layout."""
     if not images or len(images) > 12:
         return {}
     pattern = r"^\s*((?:fig(?:ure)?\.?|table|图|表)\s*[A-Z]?\d+(?:[.-]\d+)?[a-z]?)\s*[:.|：—-]\s*\S"
     captions = [line.strip() for line in text.splitlines() if re.match(pattern, line, re.I)]
+    panels = {}
+    if len(captions) == 1 and 2 <= len(images) <= 8 and re.match(r"^(?:fig|图)", captions[0], re.I):
+        panels = _labelled_panels(textpage, captions[0], images)
+        if panels:
+            images = [(min(b[0] for b in images), min(b[1] for b in images),
+                       max(b[2] for b in images), max(b[3] for b in images))]
     if len(captions) != len(images):
         return {}
     x0, y0, x1, y1 = page.get_bbox()
@@ -62,6 +153,11 @@ def _object_layout(page, textpage, text, images, reading_order):
             return {}
         layout[label] = candidates[0]
         reading_order[label] = match[0]
+        if panels:
+            panel_layout[label] = panels
+            for letter, box in panels.items():
+                layout[f"{label}{letter}"] = box
+                reading_order[f"{label}{letter}"] = match[0]
     return layout
 
 
@@ -79,7 +175,7 @@ def _crop_png(page, label):
 async def _visual_gaps(plan, evidence):
     """Use the native-text packet before spending any visual-model budget."""
     questions = [q for q in plan.subqueries if q.source == "user" and not labels(q.question)
-        and (any(r.kind == "precision" for r in q.evidence_requirements)
+        and (any(r.kind in {"precision", "visual_label"} for r in q.evidence_requirements)
              or re.search(r"hardware|gpu|cpu|a100|硬件|显卡", q.question, re.I))]
     if not questions:
         return []
@@ -87,7 +183,7 @@ async def _visual_gaps(plan, evidence):
     packets = await build_evidence_packets(scope, plan.model_copy(update={"subqueries": questions}), None)
     gaps = []
     for packet in packets:
-        relevant = {"precision", "baseline_precision"}
+        relevant = {"precision", "baseline_precision", "visual_label"}
         if re.search(r"hardware|gpu|cpu|a100|硬件|显卡", packet.question, re.I):
             relevant.add("hardware")
         missing = sorted(set(packet.missing_requirements) & relevant)
@@ -106,12 +202,16 @@ def _gap_score(label, caption, gap):
     for pattern in topics:
         if re.search(pattern, gap["question"], re.I) and re.search(pattern, caption, re.I):
             score += 2
+    if "visual_label" in gap["requirements"] and re.search(
+            r"curve|plot|latency|accuracy|distribution|曲线|分布|准确率|延迟", caption, re.I):
+        score += 1
     return score
 
 
 def _locate_text(textpage, spans, positions, source_version):
     """Keep native character order and the union of rectangles for unique exact matches."""
     for span in spans:
+        positions[span.id] = {"source_version": source_version}
         with closing(textpage.search(span.text.strip(), match_case=True)) as search:
             match = search.get_next()
             if not match or search.get_next():
@@ -158,19 +258,32 @@ def inspect_pdf(path, limit, query="", gaps=(), spans_by_page=None, positions=No
                             _locate_text(textpage, spans_by_page.get(index+1, []), positions, source_hash)
                         except pdfium.PdfiumError:
                             pass
-                    reading_order = {}
+                    reading_order, panel_layout = {}, {}
                     if image_area < width * height * .6 and len(text.strip()) >= 40:
                         try:
-                            layout = _object_layout(page, textpage, text, direct_images + form_boxes, reading_order)
+                            boxes = direct_images + form_boxes
+                            if not boxes and VISUAL.search(text):
+                                boxes = _framed_vector_boxes(page, textpage)
+                            layout = _object_layout(page, textpage, text, boxes, reading_order, panel_layout)
                         except pdfium.PdfiumError:
                             layout = {}
+                    object_texts = {}
+                    for label, box in layout.items():
+                        native_text = textpage.get_text_bounded(*box).strip()
+                        if native_text:
+                            object_texts[label] = native_text
                 # Full-page raster plus a searchable header is still a scan.
                 scanned = len(text.strip()) < 40 or image_area >= width * height * .6
                 gap_candidates = {}
                 captions = set(layout)
+                caption_texts = {}
                 for line in text.splitlines():
                     if re.match(r"(?i)^\s*(fig(?:ure)?\.?|table|图|表)\s*\d+", line):
                         captions.update(labels(line))
+                        refs = find_object_labels(line)
+                        if refs and refs[0][0] in layout and re.match(
+                                r"^\s*(?:fig(?:ure)?\.?|table|图|表)\s*\d+[a-z]?\s*[:.|：—-]", line, re.I):
+                            caption_texts[refs[0][0]] = line.strip()
                     if not gaps or not layout or not line.strip().casefold().startswith(("fig", "table", "图", "表")):
                         continue
                     refs = find_object_labels(line)
@@ -185,7 +298,7 @@ def inspect_pdf(path, limit, query="", gaps=(), spans_by_page=None, positions=No
                     continue
                 candidates.append({"page": index+1, "scanned": scanned, "captions": sorted(captions), "visual_content": bool(scanned or image_area or captions),
                     "source_version": source_hash, "page_bbox": list(page.get_bbox()),
-                    "object_bboxes": layout, "object_reading_order": reading_order if layout else {}, "gap_candidates": gap_candidates,
+                    "object_bboxes": layout, "object_texts": object_texts, "caption_texts": caption_texts, "panel_bboxes": panel_layout if layout else {}, "object_reading_order": reading_order if layout else {}, "gap_candidates": gap_candidates,
                     "priority": (int(bool(captions & wanted)), max((v["score"] for v in gap_candidates.values()), default=0), int(bool(re.search(r"(?i)ablation|benchmark|speedup|latency|实验|消融|加速", text)) and bool(captions)), int(scanned), int(bool(captions)), int(image_area > 0))})
         ordered = sorted(candidates, key=lambda p: (tuple(-x for x in p['priority']), p['page']))
         for metadata in ordered[:limit]:
@@ -318,28 +431,33 @@ async def _transcribe_crop(tasks, paper_id, page, label):
     data = await asyncio.to_thread(_crop_png, page, label)
     crop_version = hashlib.sha256(data).hexdigest()
     object_id = f"{paper_id}:visual-object:{label}"
+    profile = "visual_labels" if VISUAL_LABEL_QUERY.search(getattr(tasks, "question", "")) else "standard"
     previous = []
     for value in getattr(tasks, "previous_visual_evidence", []):
         if (not value.get("table_cell") and value.get("crop_version") == crop_version and value.get("image_version") == page["image_version"]
+                and (profile == "standard" or value.get("transcription_profile") == profile)
                 and value.get("crop_source_version") == page["source_version"]
                 and value.get("page_start") == page["page"] and value.get("visual_object_ids") == [object_id]):
             previous.append(EvidenceSpan.model_validate(value))
     if previous:
         return previous, True
-    result = await tasks.ask("visual_transcription", "逐字转录此图表裁剪中的图例、坐标轴、数值、单位和表格行列。"
-        "表格行列清楚时输出带表头和分隔行的 Markdown 管道表格，行头放在第一列，保留单位与原始脚注标记。不可辨内容记入 uncertainties，无法读取时 readable=false。", {
+    hints = {}
+    if profile == "visual_labels":
+        hints = await asyncio.to_thread(label_views, data, min(tasks.deadline, time.monotonic()+9))
+    result = await tasks.ask("visual_transcription", "oriented_label_hints 是待核对的本地 OCR 候选。只转录原图可核实的文字。逐字转录此图表裁剪中的图例、坐标轴、数值、单位和表格行列。"
+        "表格行列清楚时输出带表头和分隔行的 Markdown 管道表格，行头放在第一列，保留单位与原始脚注标记。分组列头清晰时可使用带 th、rowspan、colspan 的 HTML 表格。不可辨内容记入 uncertainties，无法读取时 readable=false。", {
             "paper_id": paper_id, "page": page["page"], "object_label": label, "bbox": bbox,
-            "crop_version": crop_version}, Transcription,
+            "crop_version": crop_version, "oriented_label_hints": hints}, Transcription,
         images=["data:image/png;base64," + base64.b64encode(data).decode()])
     if not result.readable or not result.text.strip():
         raise ValueError("裁剪内没有可靠文字")
-    version = version_of([page["source_version"], page["page"], bbox, crop_version, result.model_dump()])
+    version = version_of([page["source_version"], page["page"], bbox, crop_version, profile, result.model_dump()])
     spans = []
     for offset in range(0, len(result.text), 4000):
         spans.append(EvidenceSpan(id=f"{object_id}:ocr:{offset}@{version}", paper_id=paper_id, version=version,
             text=result.text[offset:offset+4000], source_level="full_text", page_start=page["page"], page_end=page["page"],
             bbox=bbox, source_version=page["source_version"], reading_order=page["object_reading_order"].get(label),
-            section=f"{label} 图表转录", modality="visual_transcription", view_type="ocr",
+            transcription_profile=profile, section=f"{label} 图表转录", modality="visual_transcription", view_type="ocr",
             visual_object_ids=[object_id], crop_version=crop_version, crop_source_version=page["source_version"],
             image_version=page["image_version"], transcription_uncertainties=result.uncertainties))
     return spans, False
@@ -352,7 +470,7 @@ def verification_images(tasks, raw, target):
     core = [s for s in raw if s.id in core_ids]
     for span in core:
         catalog = tasks.visual_catalog.get(span.paper_id, [])
-        if span.crop_version:
+        if span.crop_version or span.table_cell or span.view_type == "object_text":
             requested.append((span, span.page_start))
             continue
         references = labels(span.text + " " + target_text)
@@ -366,7 +484,8 @@ def verification_images(tasks, raw, target):
     for span, number in requested:
         key = (span.paper_id, number)
         page = tasks.visual_pages.get(key)
-        if not page or (span.crop_source_version and span.crop_source_version != page.get("source_version")) or (span.image_version and number == span.page_start and page['image_version'] != span.image_version):
+        source = span.crop_source_version or span.source_version
+        if not page or (source and source != page.get("source_version")) or (span.image_version and number == span.page_start and page['image_version'] != span.image_version):
             missing.append(f"{span.paper_id} 第 {number or '未知'} 页未提供匹配原图")
             continue
         if key in seen:

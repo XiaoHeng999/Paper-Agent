@@ -21,14 +21,26 @@ _FILES = {
     "tokenizer.json": "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
     "preprocessor_config.json": "6f638fb9401a6d6296feff533ee7efe657b787c49f954f82f5906b36ef2a1b1f",
 }
-_APPEARANCE = re.compile(r"\b(?:curves?|bar charts?|scatter(?:plots?)?|heatmaps?|dashed|dotted|red|blue)\b|颜色|曲线|虚线|柱状|散点|热图", re.I)
+_APPEARANCE = re.compile(r"\b(?:curves?|bar charts?|scatter(?:plots?)?|heatmaps?|dashed|dotted|red|blue|green|yellow|gr[ae]y|orange|black|white|circles?|arrows?|snapshots?|photos?|pictures?)\b|颜色|曲线|虚线|柱状|散点|热图", re.I)
+
+
+def localization_type(question):
+    match = re.search(r"\bwhich (figure|diagram|chart|plot|table)\b|哪(?:一)?(?:张|个|幅)?(图|表)", question, re.I)
+    if match and not find_object_labels(question):
+        return "table" if (match[1] or match[2]).casefold() in {"table", "表"} else "figure"
+    return None
 
 
 def visual_gap(query, packet, scope):
     if query.source != "user" or find_object_labels(query.question):
         return False
     features = _APPEARANCE.findall(query.question.casefold())
-    text = " ".join(s.text.casefold() for s in scope.read(packet.evidence_ids))
+    spans = scope.read(packet.evidence_ids)
+    kind = localization_type(query.question)
+    if kind and features:
+        return not any(len(s.visual_object_ids) == 1 and f":visual-object:{kind}:" in s.visual_object_ids[0]
+            and all(f in s.text.casefold() for f in features) for s in spans)
+    text = " ".join(s.text.casefold() for s in spans)
     return bool({"figure", "table"} & set(packet.missing_requirements)
                 or any(feature not in text for feature in features))
 
@@ -92,10 +104,16 @@ class ClipIndex:
         return sorted(scores, key=lambda v: (-v[1], v[0]))[:2], encoded
 
     async def search(self, query, scope, pages):
+        kind = localization_type(query.question)
         views = {}
         for span in scope.spans.values():
             for oid in span.visual_object_ids:
-                if oid not in views or span.view_type == "caption":
+                if kind and (len(span.visual_object_ids) != 1 or not oid.startswith(f"{span.paper_id}:visual-object:{kind}:")):
+                    continue
+                previous = views.get(oid)
+                if previous is None or (span.view_type == "caption" and
+                        (previous.view_type != "caption" or (len(span.visual_object_ids), len(span.text))
+                         < (len(previous.visual_object_ids), len(previous.text)))):
                     views[oid] = span
         candidates = []
         for (pid, _), page in pages.items():

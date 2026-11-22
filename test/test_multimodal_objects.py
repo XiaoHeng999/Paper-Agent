@@ -60,6 +60,8 @@ class MultimodalObjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cells[1].table_cell.model_dump(), {"row": 1, "column": 3,
             "row_header": "Ours", "column_header": "Latency (ms)", "value": "10*"})
         self.assertEqual(cells[1].parent_id, "t")
+        self.assertEqual(cells[1].table_notes, ["* At batch size 1."])
+        self.assertFalse(cells[3].table_notes)
         self.assertEqual(objects[0].cell_evidence_ids, [s.id for s in cells])
         self.assertEqual(build_multimodal_catalog(spans), (spans, objects))
         query = ReadingSubquery(id="rq", source="user", lens="experimental_design",
@@ -74,6 +76,34 @@ class MultimodalObjectTests(unittest.IsolatedAsyncioTestCase):
         spans, objects = build_multimodal_catalog([ragged])
         self.assertEqual(len(spans), 1)
         self.assertEqual(objects[0].cell_evidence_ids, [])
+
+    def test_explicit_multilevel_headers_and_malformed_spans(self):
+        text = ("Table 7: Timings\n<table><tr><th rowspan='2'>Model</th>"
+            "<th colspan='2'>Latency (ms)</th></tr><tr><th>Train</th><th>Eval</th></tr>"
+            "<tr><th>A</th><td>12</td><td>8</td></tr></table>")
+        span = EvidenceSpan(id="t", paper_id="p", version="v", text=text, source_level="full_text")
+        spans, _ = build_multimodal_catalog([span])
+        self.assertEqual([s.text for s in spans if s.table_cell],
+            ["A | Latency (ms) / Train | 12", "A | Latency (ms) / Eval | 8"])
+        for malformed in (text.replace("colspan='2'", "colspan='3'"), text.replace("rowspan='2'", "rowspan='0'")):
+            spans, _ = build_multimodal_catalog([span.model_copy(update={"text": malformed})])
+            self.assertFalse(any(s.table_cell for s in spans))
+
+    def test_continued_table_inherits_headers_only_from_same_version_and_adjacent_page(self):
+        first = EvidenceSpan(id="first", paper_id="p", version="1", source_version="pdf1",
+            page_start=2, source_level="full_text",
+            text="Table 3: Timings\n| Model | Latency (ms) |\n|---|---|\n| A | 12 |")
+        second = first.model_copy(update={"id": "next", "page_start": 3,
+            "text": "Table 3 (continued)\n| B | 15 |"})
+        spans, _ = build_multimodal_catalog([second, first])
+        cell, = [s for s in spans if s.table_cell and s.parent_id == "next"]
+        self.assertEqual((cell.table_cell.row, cell.table_cell.column_header, cell.table_cell.value),
+            (2, "Latency (ms)", "15"))
+        self.assertEqual(cell.header_evidence_id, "first")
+        for update in ({"page_start": 4}, {"source_version": "pdf2"},
+                {"text": second.text.replace("continued", "other")}):
+            spans, _ = build_multimodal_catalog([first, second.model_copy(update=update)])
+            self.assertFalse(any(s.table_cell and s.parent_id == "next" for s in spans))
 
     async def test_packet_expands_from_text_reference_to_other_object_views(self):
         updated, _ = build_multimodal_catalog(self.evidence(),

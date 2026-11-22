@@ -115,7 +115,7 @@ class EvidenceRequirement(Record):
     kind: Literal[
         "problem", "claim", "method_step", "equation", "assumption", "dataset",
         "baseline", "metric", "budget", "hardware", "precision", "baseline_precision", "result", "ablation",
-        "negative_result", "limitation", "implementation", "figure", "table",
+        "negative_result", "limitation", "implementation", "figure", "table", "visual_label",
     ]
     required: bool = True
     description: str = ""
@@ -258,6 +258,8 @@ class EvidenceSpan(Record):
     reading_order: int | None = Field(default=None, ge=0)
     source_version: str = ""
     table_cell: TableCell | None = None
+    header_evidence_id: str = ""
+    table_notes: list[str] = Field(default_factory=list)
     id: str
     paper_id: str
     version: str
@@ -270,13 +272,14 @@ class EvidenceSpan(Record):
     image_version: str = ""
     crop_version: str = ""
     crop_source_version: str = ""
+    transcription_profile: Literal["standard", "visual_labels"] = "standard"
     transcription_uncertainties: list[str] = Field(default_factory=list)
     previous_id: str = ""
     next_id: str = ""
     parent_id: str = ""
     overlap_characters: int = Field(default=0, ge=0)
     visual_object_ids: list[str] = Field(default_factory=list)
-    view_type: Literal["text", "caption", "ocr", "table_cell", "nearby_discussion"] = "text"
+    view_type: Literal["text", "caption", "ocr", "object_text", "table_cell", "nearby_discussion"] = "text"
 
 
 class PreparedPaper(Record):
@@ -392,7 +395,15 @@ class PrecisionComparison(Record):
     same_experiment: Literal["confirmed", "different", "unknown"] = "unknown"
 
 
+class ReferenceResolution(Record):
+    source_id: str
+    antecedent_id: str
+    referent: str = Field(min_length=1)
+    quote: str = Field(min_length=1)
+
+
 class VerificationDraft(Record):
+    resolved_references: list[ReferenceResolution] = Field(default_factory=list)
     precision_comparison: PrecisionComparison | None = None
     chain_checks: list[ChainCheck] = Field(default_factory=list)
     visual_observations: list[VisualObservation] = Field(default_factory=list, max_length=20)
@@ -420,6 +431,7 @@ class VerificationResult(VerificationDraft):
 
 
 class VisualObject(Record):
+    panel_bboxes: dict[str, list[float]] = Field(default_factory=dict)
     reading_order: int | None = Field(default=None, ge=0)
     source_version: str = ""
     crop_version: str = ""

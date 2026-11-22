@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from .image_retrieval import visual_gap
+from .image_retrieval import localization_type, visual_gap
 from .multimodal import find_object_labels
 from .models import (
     EvidenceCandidateTrace, EvidencePacket, IncrementJudgmentBatch, NodeJudgmentBatch,
@@ -17,7 +17,7 @@ from .models import (
 
 
 _RRF_OFFSET = 60
-_POLICY = "rrf-relation-greedy-v2"
+_POLICY = "rrf-relation-greedy-v3"
 
 _REQUIREMENT_TERMS = {
     "problem": ("problem", "motivation", "challenge", "问题", "动机", "挑战"),
@@ -30,6 +30,7 @@ _REQUIREMENT_TERMS = {
     "metric": ("metric", "accuracy", "precision", "recall", "f1", "bleu", "指标", "准确率"),
     "budget": ("budget", "parameter", "flop", "cost", "预算", "参数量", "计算量", "成本"),
     "precision": ("fp16", "bf16", "fp32", "fp8", "fp64", "int8", "int4", "mixed precision", "混合精度"),
+    "visual_label": ("axis label", "x-axis", "y-axis", "legend:", "坐标轴", "横轴", "纵轴", "图例", "单位"),
     "hardware": ("gpu", "cpu", "tpu", "hardware", "a100", "v100", "硬件", "显卡"),
     "result": ("result", "performance", "outperform", "improve", "结果", "性能", "提升"),
     "ablation": ("ablation", "remove", "variant", "消融", "移除", "变体"),
@@ -74,7 +75,8 @@ async def build_evidence_packets(scope, plan: ReadingPlan, tasks, *, per_packet_
                 hits = await index.search(subquery, scope, tasks.visual_pages)
                 if hits:
                     ranked = _merge_gap_hits(ranked, hits, "image_embedding")
-                    packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths)
+                    anchor = hits[0].id if localization_type(subquery.question) else None
+                    packet = _select_packet(scope, subquery, ranked, per_packet_chars, max_nodes, paths, anchor)
             except ValueError as exc:
                 warning = f"图像向量不可用，保留文本检索结果：{exc}"
                 warnings = tasks.reranking_warnings.setdefault(plan.paper_id, [])
@@ -181,11 +183,12 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
     section = _rank_sections(scope.spans.values(), subquery, 12)
     exact = _rank_exact_references(scope.spans.values(), query)
     requirement = _rank_requirements(scope.spans.values(), subquery, 16)
-    rankings = {"dense": dense, "lexical": lexical, "section": section,
-        "exact_reference": exact, "requirement": requirement}
+    rankings = {"dense": enumerate(dense, 1), "lexical": lexical,
+        "section": ((1, span) for span in section),
+        "exact_reference": ((1, span) for span in exact), "requirement": requirement}
     scores = defaultdict(float)
     for channel, spans in rankings.items():
-        for rank, span in enumerate(spans, start=1):
+        for rank, span in spans:
             scores[span.id] += 1 / (_RRF_OFFSET + rank)
             channels.setdefault(span.id, set()).add(channel)
 
@@ -194,7 +197,8 @@ async def _hybrid_candidates(scope, subquery: ReadingSubquery, tasks):
             scores[span.id] = 1 / (_RRF_OFFSET + rank)
             channels[span.id] = {"fallback"}
 
-    seed_ids = [item[0] for item in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    topical = {"dense", "exact_reference", "lexical"}
+    seed_ids = sorted(scores, key=lambda eid: (-scores[eid], not bool(topical & channels[eid]), eid))[:4]
     paths = {}
     seed_scores = dict(scores)
     definitions = _definition_index(scope.spans.values())
@@ -276,14 +280,14 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
         if bridge_id not in paths:
             continue
         bridge = scope.spans[bridge_id]
-        if bridge.crop_version:
+        if bridge.crop_version or bridge.view_type == "object_text":
             continue
         labels = set(find_object_labels(bridge.text))
         experiments = {m[1].casefold() for m in _EXPERIMENT.finditer(bridge.text)}
         if not (labels or experiments):
             continue
         for span in scope.spans.values():
-            if span.crop_version or span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
+            if span.crop_version or span.view_type == "object_text" or span.paper_id != bridge.paper_id or span.id in packet.evidence_ids or span.id in hits:
                 continue
             if span.id == paths[bridge_id][0].source_id or not _matched_requirements(span, gaps):
                 continue
@@ -302,10 +306,14 @@ def _expand_reference_gaps(scope, packet, ranked, paths):
     return sorted(entries.values(), key=lambda item: (-item[1], item[0].id))[:40] if hits else []
 
 
-def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths):
+def _select_packet(scope, subquery, ranked, char_budget, max_nodes, paths, visual_anchor=None):
     required = [item.kind for item in subquery.evidence_requirements if item.required]
     matches = {span.id: _matched_requirements(span, required) for span, _, _ in ranked}
-    anchor_entry = max(ranked, key=lambda item: (item[1] * 100 +
+    kind = localization_type(subquery.question)
+    anchors = [entry for entry in ranked if len(entry[0].visual_object_ids) == 1
+        and entry[0].visual_object_ids[0].startswith(f"{entry[0].paper_id}:visual-object:{kind}:")
+        and (not visual_anchor or entry[0].id == visual_anchor)] if kind else []
+    anchor_entry = max(anchors or ranked, key=lambda item: (item[1] * 100 +
         (1.0 if "dense" in item[2] else 0.8 if "exact_reference" in item[2] else 0), item[0].id)) if ranked else None
     selected = [anchor_entry] if anchor_entry else []
     covered = set(matches[anchor_entry[0].id]) if anchor_entry else set()
@@ -430,8 +438,17 @@ def _rank_lexical(spans, query, limit):
         score = sum(1 for term in terms if term in text)
         if score:
             ranked.append((-score, position, span))
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in ranked[:limit]]
+    return _competition_ranks(ranked, limit)
+
+
+def _competition_ranks(ranked, limit):
+    """Equal channel scores contribute equal reciprocal ranks."""
+    previous = None
+    for position, (score, _, span) in enumerate(sorted(ranked, key=lambda value: value[:2])[:limit], 1):
+        if score != previous:
+            rank = position
+            previous = score
+        yield rank, span
 
 
 def _rank_sections(spans, subquery, limit):
@@ -446,7 +463,7 @@ def _rank_exact_references(spans, query):
         return []
     matches = []
     for span in spans:
-        if span.crop_version:
+        if span.crop_version or span.view_type == "object_text":
             labels = {oid.removeprefix(f"{span.paper_id}:visual-object:") for oid in span.visual_object_ids}
         else:
             labels = {label for label, _ in find_object_labels(span.text)}
@@ -462,8 +479,7 @@ def _rank_requirements(spans, subquery, limit):
         count = len(_matched_requirements(span, required))
         if count:
             ranked.append((-count, position, span))
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in ranked[:limit]]
+    return _competition_ranks(ranked, limit)
 
 
 def _relation(anchor, span):

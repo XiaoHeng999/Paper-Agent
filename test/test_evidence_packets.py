@@ -163,6 +163,45 @@ class EvidencePacketTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("image_embedding", packet.candidate_trace[0].retrieval_channels)
         self.assertTrue(tasks.reranking_warnings["p1"])
 
+    async def test_implicit_setting_requires_a_scoped_antecedent_and_verbatim_quote(self):
+        setup = EvidenceSpan(id="setup", paper_id="p1", version="v", section="Results",
+            page_start=2, source_level="full_text", text="The low-memory configuration uses FP16.")
+        result = setup.model_copy(update={"id": "result", "page_start": 3, "previous_id": "setup",
+            "text": "Under this setting latency decreases."})
+        scope = ScopedEvidence([setup, result], {"p1"})
+        claim = Claim(id="c", paper_id="p1", version="v", statement=result.text, evidence_ids=[result.id])
+        valid = {"source_id": "result", "antecedent_id": "setup", "quote": setup.text,
+            "referent": "low-memory configuration"}
+        for resolutions, expected in [([valid], "verified"), ([], "qualified"),
+                ([{**valid, "quote": "Uses the high-memory configuration."}], "insufficient_evidence")]:
+            draft = VerificationDraft(verdict="verified", reason="reported", evidence_ids=["result"],
+                fidelity={"status": "supported", "evidence_ids": ["result"]}, resolved_references=resolutions)
+            tasks = ModelTasks(None, ResearchOptions())
+            tasks.ask = AsyncMock(return_value=draft)
+            checked = await verify(tasks, claim, scope)
+            self.assertEqual(checked.verdict, expected)
+            self.assertEqual(tasks.ask.await_args.args[2]["reference_candidates"]["result"]["candidates"], ["setup"])
+
+    async def test_verifying_a_continued_cell_reads_both_original_pages(self):
+        from src.research.multimodal import build_multimodal_catalog
+        first = EvidenceSpan(id="first", paper_id="p1", version="v", source_version="pdf",
+            source_level="full_text", page_start=1, text="Table 1: Setup\n|Model|Precision|\n|---|---|\n|A|FP32|")
+        second = first.model_copy(update={"id": "second", "page_start": 2,
+            "text": "Table 1 (continued)\n|B|FP16|"})
+        spans, _ = build_multimodal_catalog([first, second])
+        cell, = [s for s in spans if s.table_cell and s.parent_id == "second"]
+        scope = ScopedEvidence(spans, {"p1"})
+        tasks = ModelTasks(None, ResearchOptions())
+        tasks.visual_catalog["p1"] = [{"page": n, "captions": ["table:1"]} for n in (1, 2)]
+        tasks.visual_pages = {("p1", n): {"url": "image", "image_version": str(n), "source_version": "pdf"}
+                              for n in (1, 2)}
+        tasks.ask = AsyncMock(return_value=VerificationDraft(verdict="insufficient_evidence",
+            reason="unconfirmed", evidence_ids=[]))
+        target = Claim(id="c", paper_id="p1", version="v", statement="B uses FP16", evidence_ids=[cell.id])
+        checked = await verify(tasks, target, scope)
+        self.assertIn("first", checked.inspected_evidence_ids)
+        self.assertEqual({p["page"] for p in tasks.ask.await_args.args[2]["visual_pages"]}, {1, 2})
+
     async def test_exact_reference_channel_is_auditable(self):
         table = EvidenceSpan(id="table", paper_id="p1", version="1", source_level="full_text",
             text="Table 2 reports latency and accuracy results.", section="Results")

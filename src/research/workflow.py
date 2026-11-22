@@ -58,6 +58,8 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
             for path in result.retrieval_paths:
                 for hop in path:
                     lines.append(f"- [{hop.source_id}] → {hop.relation} → [{hop.target_id}]（{hop.provenance}）")
+            for ref in result.resolved_references:
+                lines.append(f"指代核查 [{ref.source_id}] → {ref.referent} [{ref.antecedent_id}]，原文“{ref.quote}”")
             for chain in result.chain_checks:
                 lines.append(f"链路核查（{' → '.join(chain.evidence_ids)}）{chain.status}，{chain.reason}")
             if result.precision_comparison:
@@ -77,6 +79,7 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
         cited_ids = list(claim.evidence_ids)
         if result:
             cited_ids.extend(result.evidence_ids)
+            cited_ids.extend(ref.antecedent_id for ref in result.resolved_references)
             inspected = set(result.inspected_evidence_ids)
             cited_ids.extend(eid for path in result.retrieval_paths for hop in path
                 for eid in (hop.source_id, hop.target_id) if eid in inspected)
@@ -84,6 +87,7 @@ def render_card(card: PaperCard, spans: ScopedEvidence, compact: bool = False) -
                 cited_ids.extend(check.evidence_ids)
             for dimension in result.dimensions:
                 cited_ids.extend(dimension.evidence_ids)
+        cited_ids.extend([span.header_evidence_id for span in spans.read(cited_ids) if span.header_evidence_id])
         for span in spans.read(cited_ids):
             location = f"第 {span.page_start} 页" if span.page_start else span.section
             lines.append(f"来源 [{span.id}]（{'全文' if span.source_level == 'full_text' else '摘要'}，{location}）")

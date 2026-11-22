@@ -23,7 +23,7 @@ from src.research.models import Claim, EvidenceSpan, ResearchOptions, PaperCard,
 from src.research.multimodal import build_multimodal_catalog
 from src.research.provenance import source_manifest, document_version
 from src.research.scheduling import comparison_schedule
-from src.research.visual import prepare_visual, inspect_pdf, verification_images
+from src.research.visual import labels, prepare_visual, inspect_pdf, verification_images
 from src.research.workflow import run_research_node
 from src.research.supplement import supplement_sources
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
@@ -160,12 +160,56 @@ class VisualReviewTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(unrequested)
             self.assertEqual(len(model.images), 1)
 
+            tasks.question = "Read the y-axis label in Figure 2"
+            with patch("src.research.visual.label_views", return_value={"270": "Layer Index"}) as local_read:
+                oriented, _ = await prepare_visual(tasks, paper, [])
+                local_read.assert_called_once()
+            self.assertEqual(oriented[0].transcription_profile, "visual_labels")
+            self.assertEqual(model.requests[-1]["oriented_label_hints"], {"270": "Layer Index"})
+
             # A two-panel figure with only one caption has no reliable single-raster boundary.
             stream.set_data(stream.get_data().replace(b"Figure 1:", b"Results:"))
             with path.open("wb") as out:
                 writer.write(out)
             _, _, catalog = inspect_pdf(path, 1)
             self.assertEqual(catalog[0]["object_bboxes"], {})
+
+    def test_two_labelled_panels_share_a_figure_only_with_matching_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panels.pdf"
+            writer, stream = two_figure_pdf(path)
+            image = next(iter(writer.pages[0]["/Resources"]["/XObject"]))
+            body = f"""q 100 0 0 80 40 240 cm {image} Do Q
+                q 100 0 0 80 160 240 cm {image} Do Q
+                BT /HeaderFont 10 Tf 42 304 Td ((a)) Tj ET
+                BT /HeaderFont 10 Tf 162 304 Td ((b)) Tj ET
+                BT /HeaderFont 12 Tf 40 220 Td (Figure 1: (a) Accuracy and (b) Latency across runs) Tj ET"""
+            for marker, expected in [("(b)", True), ("(c)", False)]:
+                stream.set_data(body.replace("162 304 Td ((b))", f"162 304 Td ({marker})").encode())
+                with path.open("wb") as out:
+                    writer.write(out)
+                pages, _, _ = inspect_pdf(path, 1)
+                self.assertEqual(bool(pages[0]["panel_bboxes"]), expected)
+                if expected:
+                    self.assertEqual(pages[0]["object_bboxes"]["figure:1"], [40,240,260,320])
+                    self.assertEqual(set(pages[0]["panel_bboxes"]["figure:1"]), {"a", "b"})
+                    self.assertEqual(pages[0]["object_bboxes"]["figure:1b"], [160, 240, 260, 320])
+                    self.assertEqual(labels("Inspect Figure 1(b)"), {"figure:1b"})
+
+    def test_framed_vector_diagram_rejects_outside_tick_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "vector.pdf"
+            writer, stream = two_figure_pdf(path)
+            body = """40 240 200 80 re S
+                50 250 30 30 re S
+                120 250 30 30 re S
+                BT /HeaderFont 12 Tf 40 214 Td (Figure 4: Vector diagram of the training process) Tj ET"""
+            for extra, expected in [("", True), (" BT /HeaderFont 8 Tf 244 265 Td (ms) Tj ET", False)]:
+                stream.set_data((body + extra).encode())
+                with path.open("wb") as out:
+                    writer.write(out)
+                pages, _, _ = inspect_pdf(path, 1)
+                self.assertEqual("figure:4" in pages[0]["pixel_bboxes"], expected)
 
     async def test_rotation_keeps_crop_and_native_text_in_the_same_pdf_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:

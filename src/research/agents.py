@@ -186,6 +186,42 @@ def _packet_views(packets: list[EvidencePacket], supplied_ids: set[str]) -> list
     return result
 
 
+_REFERENCE_OPENING = re.compile(
+    r"^\s*((?:(?:under|in|with) )?(?:this|that|the former|the latter) "
+    r"(?:module|mechanism|setting|configuration|variant|experiment)\b|(?:该|上述|这一)(?:模块|机制|设置|配置|变体|实验))", re.I)
+
+
+def _reference_context(evidence, core_ids, cited_ids, budget):
+    """Offer only linked predecessors from the same paper and section."""
+    core = evidence.read(core_ids)
+    total = sum(len(span.text) for span in core)
+    pending = {}
+    for source in core:
+        match = _REFERENCE_OPENING.match(source.text)
+        if source.id not in cited_ids or not match or source.view_type not in {"text", "nearby_discussion"}:
+            continue
+        candidates = []
+        current = source
+        for _ in range(2):
+            prior = evidence.spans.get(current.previous_id)
+            page_sections = prior and re.fullmatch(r"page_\d+", prior.section) and re.fullmatch(r"page_\d+", source.section)
+            if (not prior or prior.paper_id != source.paper_id or (prior.section != source.section and not page_sections)
+                    or prior.id == source.id or prior.id in candidates or
+                    (prior.source_version and source.source_version and prior.source_version != source.source_version)):
+                break
+            candidates.append(prior.id)
+            current = prior
+        extra = [eid for eid in candidates if eid not in core_ids]
+        size = sum(len(evidence.spans[eid].text) for eid in extra)
+        if total + size <= budget:
+            core_ids.extend(extra)
+            total += size
+        else:
+            candidates = []
+        pending[source.id] = {"phrase": match[1], "candidates": candidates}
+    return pending
+
+
 async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportParagraph, evidence: ScopedEvidence, claims: list[Claim] | None = None, *, relations=None, evidence_packets=()) -> VerificationResult:
     scope = "paper" if len(evidence.allowed) == 1 else "cross_paper"
     levels, raw, omitted, visual_context = [], [], [], []
@@ -201,6 +237,9 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                     key = (path[0].source_id, path[0].target_id, item.evidence_id)
                     chains[key] = [hop.model_dump() for hop in path]
         core_ids = list(dict.fromkeys([*target.evidence_ids, *(eid for key in chains for eid in key)]))
+        header_ids = [s.header_evidence_id for s in evidence.read(core_ids) if s.header_evidence_id]
+        core_ids = list(dict.fromkeys([*core_ids, *header_ids]))
+        references = _reference_context(evidence, core_ids, cited, tasks.options.context_chars)
         raw, omitted = await evidence.adversarial(core_ids,
             target.statement if hasattr(target, "statement") else target.rationale, tasks.options.context_chars, tasks)
         levels = sorted({x.source_level for x in raw})
@@ -210,7 +249,8 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
             packet.subquery_id in target.subquery_ids and
             "baseline_precision" in [*packet.covered_requirements, *packet.missing_requirements]
             for packet in evidence_packets)
-        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+        draft = await tasks.ask("evidence_verifier", "独立核查目标与原文。对 reference_candidates 中影响理解的指代，只有原文能唯一定位对象时填写 resolved_references，提供候选 antecedent_id、逐字引句和引句中的指代对象名；存在歧义时留空。precision_comparison_required 为真时，分别定位该实验方法与基线的数值精度。precision_comparison 中填写原文逐字引句、其中出现的精度和证据 ID，缺少一方留 null。不得把方法设置赋给基线。对每条 retrieval_chains 按顺序在 chain_checks 中列出三个证据 ID，核查结果、方法、实验设置和精度是否对齐，并引用具体依据。仅共享图表编号无法确认配置一致。缺失标为 unknown。每个已提供原页必须填写 visual_observations，记录真实图表/单元格位置、观察、数值、单位、条件及 supports/contradicts/unclear；无法辨认填 unclear。针对具体主张的薄弱前提填写 challenges，记录前提、替代解释、能区分它们的实验和依据，不能编造已经存在的反证。附带图像时必须逐项检查图表数值、坐标轴、单位、图例、误差条和表注；视觉转录不是独立证据，应回看对应原页。图像不可辨时标记 needs_human_review，不得补造数字。paper 范围只核查当前论文，区分忠实转述和实验是否充分支持推论；cross_paper 范围检查关系以及比较条件。不得把条件不同当作冲突。证据不足时不能 verified；qualified 必须给出限定条件及 repair_request。必须分别填 fidelity（原文是否确实如此陈述）、experimental_support（实验是否充分支撑结论）、counterevidence（内部消融/失败/局限是否挑战结论），unknown 表示未证实而不是没有问题。counterevidence supported 表示已找到对目标的反证，contradicted 表示已定位证据排除了所检查的反例；未找到反证一律 unknown。每项已知判断必须引用原文。可评价五个维度，0=明确证据显示严重问题，1=弱，2=部分，3=较充分，4=当前已审证据充分；缺信息必须 score=null，不能打零。方法增量与比较公平性在单篇范围只能表示作者报告的内部比较，不能代表领域新颖性。verified 仅表示当前来源支持该判断，不代表现实复现或领域新颖性获认证。", {
+            "reference_candidates": references,
             "precision_comparison_required": precision_required,
             "retrieval_chains": list(chains.values()),
             "visual_pages": visual_context, "visual_unchecked": visual_missing,
@@ -219,6 +259,14 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
             "relations": [r.model_dump() for r in relations or []],
             "evidence": [x.model_dump() for x in raw], "omitted_evidence_ids": omitted[:50], "omitted_evidence_count": len(omitted),
         }, VerificationDraft, images=images)
+        resolved = set()
+        for resolution in draft.resolved_references:
+            candidates = references.get(resolution.source_id, {}).get("candidates", [])
+            if (resolution.source_id in resolved or resolution.antecedent_id not in candidates or
+                    resolution.quote not in evidence.spans[resolution.antecedent_id].text or
+                    resolution.referent not in resolution.quote):
+                raise ValueError("指代判断缺少有效候选或逐字原文")
+            resolved.add(resolution.source_id)
         checks = {tuple(check.evidence_ids): check for check in draft.chain_checks}
         if checks.keys() - chains.keys() or len(checks) != len(draft.chain_checks):
             raise ValueError("Verifier 返回了未提供或重复的检索链")
@@ -315,6 +363,12 @@ async def verify(tasks: ModelTasks, target: Claim | AnalysisRelation | ReportPar
                 draft.verdict = "qualified"
                 draft.reason += "；精度差异对结果的影响尚未确定"
                 draft.repair_request = "定位同一实验中方法及基线的精度设置，或收窄归因"
+        for eid in sorted(references.keys() - resolved):
+            draft.unchecked.append(f"{eid} 中的“{references[eid]['phrase']}”所指对象未确认")
+            if draft.verdict == "verified":
+                draft.verdict = "qualified"
+                draft.reason += "；引用段落的指代对象仍待确认"
+                draft.repair_request = draft.repair_request or "定位该指代的实验、配置或模块并补充原文"
         if unresolved:
             draft.unchecked.extend("实验配置未对齐：" + " → ".join(key) for key in unresolved)
             if draft.verdict == "verified":

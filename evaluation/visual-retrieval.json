@@ -1,21 +1,61 @@
-{
-  "paper_id": "2610.14672v1",
-  "source_version": "59d8f5473682724fd8bd07e35b8fef7db2743a2418a971be08fb06114bbc77d4",
-  "cases": [
-    {
-      "id": "heatmap",
-      "question": "Which figure displays a yellow and dark blue heatmap matrix?",
-      "label": "figure:1"
-    },
-    {
-      "id": "diagram",
-      "question": "Which figure is a wide architecture diagram with red and blue boxes connected by arrows?",
-      "label": "figure:2"
-    },
-    {
-      "id": "bars",
-      "question": "Which figure combines a red and blue bar chart with a line that rises sharply?",
-      "label": "figure:3"
-    }
-  ]
-}
+[
+  {
+    "paper_id": "2610.14672v1",
+    "source_version": "59d8f5473682724fd8bd07e35b8fef7db2743a2418a971be08fb06114bbc77d4",
+    "cases": [
+      {
+        "id": "heatmap",
+        "question": "Which figure displays a yellow and dark blue heatmap matrix?",
+        "label": "figure:1",
+        "visible_text": "Layer Index"
+      },
+      {
+        "id": "diagram",
+        "question": "Which figure is a wide architecture diagram with red and blue boxes connected by arrows?",
+        "label": "figure:2",
+        "visible_text": "Adaptive competition domains"
+      },
+      {
+        "id": "bars",
+        "question": "Which figure combines a red and blue bar chart with a line that rises sharply?",
+        "label": "figure:3",
+        "visible_text": "Competition-Domain Mismatch"
+      }
+    ]
+  },
+  {
+    "paper_id": "IROS55552.2023.10342187",
+    "source_version": "41ee371b5fab00cb5dfca30a236ca7c10e67b4852656cac1cb3a3d2db2ba7e00",
+    "cases": [
+      {
+        "id": "jump",
+        "question": "Which figure shows two strips of snapshots of a jumping robot, a grey simulation above photos?",
+        "label": "figure:1"
+      },
+      {
+        "id": "controller",
+        "question": "Which diagram has a blue neural network on the right and orange controller boxes on the left?",
+        "label": "figure:2",
+        "visible_text": "End-to-End Torque Policy"
+      },
+      {
+        "id": "optimization",
+        "question": "Which figure has an optimization loop with two pictures and a circle below them?",
+        "label": "figure:5",
+        "visible_text": "position difference cost"
+      }
+    ]
+  },
+  {
+    "paper_id": "2607.24027v1",
+    "source_version": "32e34bb92dbb0deca5c547409feec6ae8af09a3c7178fbc6e201dbdc650076fa",
+    "cases": [
+      {
+        "id": "tiles",
+        "question": "Which diagram shows repeated green tiles with arrows between the two iterations?",
+        "label": "figure:4",
+        "visible_text": "Proxy Scores"
+      }
+    ]
+  }
+]
